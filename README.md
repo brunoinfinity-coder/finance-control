@@ -8,7 +8,18 @@ A versão atual é um MVP local, visual e prático, focado em responder rapidame
 - Quais contas ainda vencem?
 - O que já foi pago e o que não foi pago?
 - Quanto vai sobrar este mês?
-- Quanto vai sobrar no próximo mês considerando o planejamento?
+- Quanto sobra no mês selecionado separando dinheiro e cartão alimentação?
+
+## Abas principais
+
+- Dashboard
+- Receita
+- Gastos
+- Contas
+- Login
+- Configurações
+
+O seletor de mês controla Dashboard, Receita, Gastos e Contas. A aba Receita separa salário/renda em dinheiro de cartão alimentação, incluindo saídas manuais do alimentação.
 
 ## Stack
 
@@ -42,6 +53,8 @@ npm run build
 ## Dados locais e nuvem
 
 O app continua funcionando com `localStorage` quando não há login ou quando Supabase não está configurado. Com login ativo, os dados são sincronizados com Supabase e o `localStorage` continua como backup local.
+
+A estrutura atual também salva `monthlyRevenue`, usada para salários, rendas extras, cartões alimentação e saídas manuais do alimentação.
 
 ## Deploy na Netlify
 

@@ -107,6 +107,23 @@ create table if not exists public.monthly_planning (
   constraint monthly_planning_user_month_unique unique (user_id, year, month)
 );
 
+create table if not exists public.monthly_revenue (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  year integer not null,
+  month integer not null check (month between 1 and 12),
+  bruno_salary numeric(14, 2) not null default 0,
+  mariah_salary numeric(14, 2) not null default 0,
+  extra_income numeric(14, 2) not null default 0,
+  other_income numeric(14, 2) not null default 0,
+  bruno_food_card numeric(14, 2) not null default 0,
+  mariah_food_card numeric(14, 2) not null default 0,
+  food_card_outflows jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint monthly_revenue_user_month_unique unique (user_id, year, month)
+);
+
 create table if not exists public.categories (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -149,6 +166,11 @@ create trigger set_monthly_planning_updated_at
 before update on public.monthly_planning
 for each row execute function public.set_updated_at();
 
+drop trigger if exists set_monthly_revenue_updated_at on public.monthly_revenue;
+create trigger set_monthly_revenue_updated_at
+before update on public.monthly_revenue
+for each row execute function public.set_updated_at();
+
 drop trigger if exists set_categories_updated_at on public.categories;
 create trigger set_categories_updated_at
 before update on public.categories
@@ -159,6 +181,7 @@ alter table public.fixed_bills enable row level security;
 alter table public.fixed_bill_occurrences enable row level security;
 alter table public.quick_expenses enable row level security;
 alter table public.monthly_planning enable row level security;
+alter table public.monthly_revenue enable row level security;
 alter table public.categories enable row level security;
 
 create policy "Users can read own financial settings"
@@ -246,6 +269,23 @@ create policy "Users can delete own monthly planning"
 on public.monthly_planning for delete
 using (auth.uid() = user_id);
 
+create policy "Users can read own monthly revenue"
+on public.monthly_revenue for select
+using (auth.uid() = user_id);
+
+create policy "Users can insert own monthly revenue"
+on public.monthly_revenue for insert
+with check (auth.uid() = user_id);
+
+create policy "Users can update own monthly revenue"
+on public.monthly_revenue for update
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+create policy "Users can delete own monthly revenue"
+on public.monthly_revenue for delete
+using (auth.uid() = user_id);
+
 create policy "Users can read own categories"
 on public.categories for select
 using (auth.uid() = user_id);
@@ -274,9 +314,10 @@ Em `Authentication > Providers`, mantenha `Email` habilitado. Se quiser login se
 2. Acesse a aba `Login`.
 3. Crie uma conta.
 4. Faça login.
-5. Cadastre saldo, conta fixa, planejamento e gasto rápido.
+5. Cadastre receita do mês, saldo, conta fixa e gasto rápido.
 6. Atualize a página e confirme que a sessão continua ativa.
 7. Abra o Supabase Table Editor e confirme os dados com seu `user_id`.
 8. Faça logout e confirme que o app continua funcionando com `localStorage`.
 9. Faça login novamente e clique em `Migrar dados locais para minha conta`.
 10. Confirme que os dados foram enviados para Supabase sem apagar o backup local.
+11. Confira a tabela `monthly_revenue` para validar salários, cartão alimentação e saídas manuais.

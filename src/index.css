@@ -4,7 +4,19 @@
 
 @layer components {
   .input {
-    @apply min-h-11 w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100;
+    @apply min-h-11 w-full rounded-2xl border border-slate-100 bg-white px-3.5 py-2.5 text-sm text-slate-950 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:ring-4 focus:ring-slate-100;
+  }
+
+  .btn-primary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/10 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-secondary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-2xl border border-slate-100 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-mini {
+    @apply inline-flex min-h-9 items-center justify-center rounded-2xl px-3 py-1.5 text-xs font-semibold transition;
   }
 }
 
