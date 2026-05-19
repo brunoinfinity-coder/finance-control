@@ -25,15 +25,19 @@ import {
   Download,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   PiggyBank,
   Plus,
   Target,
   Trash2,
   Upload,
+  User,
   Wallet,
 } from 'lucide-react';
+import { isSupabaseConfigured, supabase } from './lib/supabaseClient';
 
 const STORAGE_KEY = 'finance-control:v1';
+const CLOUD_SAVE_DELAY = 800;
 
 const DEFAULT_CATEGORIES = [
   'Mercado',
@@ -180,6 +184,164 @@ function loadData() {
   }
 }
 
+function localSnapshotFromState({ entries, fixedBills, account, planning, categories }) {
+  return { entries, fixedBills, account, planning, categories };
+}
+
+function splitMonth(month) {
+  const [year, monthNumber] = month.split('-').map(Number);
+  return { year, monthNumber };
+}
+
+function joinMonth(year, monthNumber) {
+  return `${year}-${String(monthNumber).padStart(2, '0')}`;
+}
+
+function accountFromSettings(settings) {
+  return {
+    currentBalance: Number(settings?.current_balance || 0),
+    currentIncomeExpected: Number(settings?.current_income_expected || 0),
+    nextIncomeExpected: Number(settings?.next_income_expected || 0),
+    previousBalance: Number(settings?.previous_balance || 0),
+    minimumReserve: Number(settings?.minimum_reserve || 0),
+  };
+}
+
+function settingsFromAccount(account, userId) {
+  return {
+    user_id: userId,
+    current_balance: Number(account.currentBalance || 0),
+    current_income_expected: Number(account.currentIncomeExpected || 0),
+    next_income_expected: Number(account.nextIncomeExpected || 0),
+    previous_balance: Number(account.previousBalance || 0),
+    minimum_reserve: Number(account.minimumReserve || 0),
+  };
+}
+
+function fixedBillRows(fixedBills, userId) {
+  return fixedBills.map((bill) => ({
+    id: bill.id,
+    user_id: userId,
+    name: bill.name,
+    value: Number(bill.value || 0),
+    due_day: Number(bill.dueDay || 1),
+    category: bill.category || 'Outros',
+    recurring: bill.recurring !== false,
+    active: bill.active !== false,
+    start_month: bill.startMonth || CURRENT_MONTH,
+  }));
+}
+
+function occurrenceRows(fixedBills, userId) {
+  return fixedBills.flatMap((bill) =>
+    Object.entries(bill.paidMonths || {})
+      .filter(([, paid]) => paid)
+      .map(([month]) => {
+        const { year, monthNumber } = splitMonth(month);
+        return {
+          user_id: userId,
+          fixed_bill_id: bill.id,
+          year,
+          month: monthNumber,
+          status: 'paid',
+          paid_at: new Date().toISOString(),
+        };
+      }),
+  );
+}
+
+function entryRows(entries, userId) {
+  return entries.map((entry) => ({
+    id: entry.id,
+    user_id: userId,
+    description: entry.description,
+    value: Number(entry.value || 0),
+    category: entry.category || 'Outros',
+    payment_method: entry.paymentMethod || 'Pix',
+    entry_date: entry.date || TODAY,
+    entry_month: entry.month || monthFromDate(entry.date || TODAY),
+    type: entry.type || 'Despesa',
+    status: entry.status || 'Pago',
+    note: entry.note || '',
+  }));
+}
+
+function planningRows(planning, userId) {
+  return Object.entries(planning || {}).map(([month, plan]) => {
+    const { year, monthNumber } = splitMonth(month);
+    return {
+      user_id: userId,
+      year,
+      month: monthNumber,
+      expected_income: Number(plan.renda || 0),
+      planned_variable_expenses: Number(plan.despesas || 0),
+      planned_debts: Number(plan.dividas || 0),
+      planned_investments: Number(plan.investimentos || 0),
+      target_reserve: Number(plan.reserva || 0),
+    };
+  });
+}
+
+function categoryRows(categories, userId) {
+  return categories.map((name) => ({ user_id: userId, name }));
+}
+
+function buildStateFromCloud({ settings, fixedBillsRows, occurrenceRowsData, entriesRows, planningRowsData, categoriesRows }) {
+  const paidByBill = occurrenceRowsData.reduce((acc, row) => {
+    const month = joinMonth(row.year, row.month);
+    acc[row.fixed_bill_id] = { ...(acc[row.fixed_bill_id] || {}), [month]: row.status === 'paid' };
+    return acc;
+  }, {});
+
+  const fixedBills = fixedBillsRows.map((bill) => ({
+    id: bill.id,
+    name: bill.name,
+    value: Number(bill.value || 0),
+    dueDay: Number(bill.due_day || 1),
+    category: bill.category || 'Outros',
+    recurring: bill.recurring !== false,
+    active: bill.active !== false,
+    startMonth: bill.start_month || CURRENT_MONTH,
+    paidMonths: paidByBill[bill.id] || {},
+  }));
+
+  const entries = entriesRows.map((entry) => ({
+    id: entry.id,
+    date: entry.entry_date || TODAY,
+    month: entry.entry_month || monthFromDate(entry.entry_date || TODAY),
+    type: entry.type || 'Despesa',
+    description: entry.description || 'Lançamento',
+    category: entry.category || 'Outros',
+    paymentMethod: entry.payment_method || 'Pix',
+    value: Number(entry.value || 0),
+    status: entry.status || 'Pago',
+    note: entry.note || '',
+  }));
+
+  const planning = planningRowsData.reduce((acc, plan) => {
+    const month = joinMonth(plan.year, plan.month);
+    acc[month] = {
+      ...defaultPlanning(month),
+      renda: Number(plan.expected_income || 0),
+      despesas: Number(plan.planned_variable_expenses || 0),
+      dividas: Number(plan.planned_debts || 0),
+      investimentos: Number(plan.planned_investments || 0),
+      reserva: Number(plan.target_reserve || 0),
+    };
+    return acc;
+  }, {});
+
+  const categories = categoriesRows.length ? categoriesRows.map((category) => category.name) : DEFAULT_CATEGORIES;
+
+  return {
+    entries: normalizeEntries(entries),
+    fixedBills: normalizeFixedBills(fixedBills),
+    account: { ...defaultAccount(), ...accountFromSettings(settings) },
+    planning: Object.keys(planning).length ? planning : { [CURRENT_MONTH]: defaultPlanning(CURRENT_MONTH), [nextMonth(CURRENT_MONTH)]: defaultPlanning(nextMonth(CURRENT_MONTH)) },
+    categories,
+  };
+}
+
 function sumBy(items, predicate) {
   return items.filter(predicate).reduce((total, item) => total + Number(item.value || 0), 0);
 }
@@ -234,6 +396,13 @@ function App() {
     recurring: true,
     active: true,
   });
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(isSupabaseConfigured);
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudLoaded, setCloudLoaded] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
+  const [localMigrationSnapshot, setLocalMigrationSnapshot] = useState(null);
   const fileInputRef = useRef(null);
 
   const currentMonth = selectedMonth;
@@ -247,6 +416,51 @@ function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries, fixedBills, account, planning, categories }));
   }, [entries, fixedBills, account, planning, categories]);
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      return undefined;
+    }
+
+    let mounted = true;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setCloudLoaded(false);
+      setAuthMessage('');
+    });
+
+    return () => {
+      mounted = false;
+      subscription.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session?.user || !supabase) {
+      setCloudLoaded(false);
+      return;
+    }
+
+    loadCloudData(session.user.id);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!session?.user || !supabase || !cloudLoaded) return undefined;
+
+    const timeout = window.setTimeout(() => {
+      saveCloudData(session.user.id, localSnapshotFromState({ entries, fixedBills, account, planning, categories }));
+    }, CLOUD_SAVE_DELAY);
+
+    return () => window.clearTimeout(timeout);
+  }, [account, categories, cloudLoaded, entries, fixedBills, planning, session?.user?.id]);
 
   const forecasts = useMemo(() => {
     const paidEntries = sumBy(monthEntries, (entry) => entry.status === 'Pago' && EXPENSE_TYPES.includes(entry.type));
@@ -315,6 +529,125 @@ function App() {
 
     return { byCategory, plannedVsDone, daily };
   }, [categories, currentBills, forecasts, monthEntries]);
+
+  async function loadCloudData(userId) {
+    setCloudLoading(true);
+    setSyncMessage('Carregando dados da nuvem...');
+    setLocalMigrationSnapshot((current) => current || loadData());
+
+    try {
+      const [settingsResult, fixedBillsResult, occurrencesResult, entriesResult, planningResult, categoriesResult] = await Promise.all([
+        supabase.from('financial_settings').select('*').eq('user_id', userId).maybeSingle(),
+        supabase.from('fixed_bills').select('*').eq('user_id', userId).order('due_day'),
+        supabase.from('fixed_bill_occurrences').select('*').eq('user_id', userId),
+        supabase.from('quick_expenses').select('*').eq('user_id', userId).order('entry_date', { ascending: false }),
+        supabase.from('monthly_planning').select('*').eq('user_id', userId),
+        supabase.from('categories').select('*').eq('user_id', userId).order('name'),
+      ]);
+
+      const error = settingsResult.error || fixedBillsResult.error || occurrencesResult.error || entriesResult.error || planningResult.error || categoriesResult.error;
+      if (error) throw error;
+
+      const hasCloudData =
+        settingsResult.data ||
+        fixedBillsResult.data?.length ||
+        occurrencesResult.data?.length ||
+        entriesResult.data?.length ||
+        planningResult.data?.length ||
+        categoriesResult.data?.length;
+
+      if (hasCloudData) {
+        const cloudState = buildStateFromCloud({
+          settings: settingsResult.data,
+          fixedBillsRows: fixedBillsResult.data || [],
+          occurrenceRowsData: occurrencesResult.data || [],
+          entriesRows: entriesResult.data || [],
+          planningRowsData: planningResult.data || [],
+          categoriesRows: categoriesResult.data || [],
+        });
+
+        setEntries(cloudState.entries);
+        setFixedBills(cloudState.fixedBills);
+        setAccount(cloudState.account);
+        setPlanning(cloudState.planning);
+        setCategories(cloudState.categories);
+        setSyncMessage('Dados carregados do Supabase.');
+      } else {
+        setSyncMessage('Conta sem dados na nuvem. Use a migração para enviar seus dados locais.');
+      }
+
+      setCloudLoaded(true);
+    } catch (error) {
+      setSyncMessage(`Não foi possível carregar do Supabase: ${error.message}`);
+      setCloudLoaded(false);
+    } finally {
+      setCloudLoading(false);
+    }
+  }
+
+  async function saveCloudData(userId, snapshot) {
+    try {
+      setSyncMessage('Sincronizando...');
+
+      const settingsResult = await supabase.from('financial_settings').upsert(settingsFromAccount(snapshot.account, userId), { onConflict: 'user_id' });
+      if (settingsResult.error) throw settingsResult.error;
+
+      await replaceUserRows('categories', categoryRows(snapshot.categories, userId), userId);
+      await replaceUserRows('quick_expenses', entryRows(snapshot.entries, userId), userId);
+      await replaceUserRows('monthly_planning', planningRows(snapshot.planning, userId), userId);
+      await replaceFixedBills(snapshot.fixedBills, userId);
+
+      setSyncMessage('Dados sincronizados com Supabase.');
+    } catch (error) {
+      setSyncMessage(`Falha ao sincronizar: ${error.message}`);
+    }
+  }
+
+  async function replaceUserRows(table, rows, userId) {
+    const deleteResult = await supabase.from(table).delete().eq('user_id', userId);
+    if (deleteResult.error) throw deleteResult.error;
+    if (!rows.length) return;
+    const insertResult = await supabase.from(table).insert(rows);
+    if (insertResult.error) throw insertResult.error;
+  }
+
+  async function replaceFixedBills(rows, userId) {
+    const occurrencesDelete = await supabase.from('fixed_bill_occurrences').delete().eq('user_id', userId);
+    if (occurrencesDelete.error) throw occurrencesDelete.error;
+    const billsDelete = await supabase.from('fixed_bills').delete().eq('user_id', userId);
+    if (billsDelete.error) throw billsDelete.error;
+
+    const bills = fixedBillRows(rows, userId);
+    if (bills.length) {
+      const billsInsert = await supabase.from('fixed_bills').insert(bills);
+      if (billsInsert.error) throw billsInsert.error;
+    }
+
+    const occurrences = occurrenceRows(rows, userId);
+    if (occurrences.length) {
+      const occurrencesInsert = await supabase.from('fixed_bill_occurrences').insert(occurrences);
+      if (occurrencesInsert.error) throw occurrencesInsert.error;
+    }
+  }
+
+  async function migrateLocalDataToCloud() {
+    if (!session?.user || !supabase) return;
+
+    setCloudLoading(true);
+    const snapshot = localMigrationSnapshot || loadData();
+    await saveCloudData(session.user.id, snapshot);
+    await loadCloudData(session.user.id);
+    setSyncMessage('Migração concluída. O backup local foi mantido neste dispositivo.');
+    setCloudLoading(false);
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setSession(null);
+    setCloudLoaded(false);
+    setSyncMessage('Você saiu. Os dados locais continuam disponíveis neste dispositivo.');
+  }
 
   function updateAccount(field, value) {
     const numberValue = parseMoney(value);
@@ -447,6 +780,11 @@ function App() {
             <div>
               <p className="text-sm font-medium text-emerald-700">Fluxo simplificado</p>
               <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Painel financeiro pessoal</h1>
+              <p className="mt-1 text-sm text-slate-500">
+                {session?.user
+                  ? `Conectado como ${session.user.email}. ${syncMessage || 'Sincronização ativa.'}`
+                  : 'Dados salvos apenas neste dispositivo. Faça login para sincronizar.'}
+              </p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <label className="flex min-h-11 items-center gap-2 rounded-lg border border-line bg-white px-3 py-2 text-sm shadow-sm">
@@ -514,6 +852,18 @@ function App() {
               updatePlanningValue={updatePlanningValue}
             />
           )}
+          {activeView === 'login' && (
+            <AuthPanel
+              session={session}
+              authLoading={authLoading}
+              cloudLoading={cloudLoading}
+              authMessage={authMessage}
+              setAuthMessage={setAuthMessage}
+              syncMessage={syncMessage}
+              migrateLocalDataToCloud={migrateLocalDataToCloud}
+              signOut={signOut}
+            />
+          )}
         </div>
       </main>
     </div>
@@ -541,6 +891,7 @@ function Navigation({ activeView, setActiveView, compact = false }) {
     { id: 'contas', label: 'Contas fixas', icon: ListChecks },
     { id: 'gastos', label: 'Gasto rápido', icon: CreditCard },
     { id: 'planejamento', label: 'Próximo mês', icon: Target },
+    { id: 'login', label: 'Login', icon: User },
   ];
 
   return (
@@ -562,6 +913,131 @@ function Navigation({ activeView, setActiveView, compact = false }) {
         );
       })}
     </nav>
+  );
+}
+
+function AuthPanel({ session, authLoading, cloudLoading, authMessage, setAuthMessage, syncMessage, migrateLocalDataToCloud, signOut }) {
+  const [mode, setMode] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submitAuth(event) {
+    event.preventDefault();
+    setSubmitting(true);
+    setAuthMessage('');
+
+    try {
+      if (!supabase) {
+        setAuthMessage('Supabase ainda não está configurado. Defina VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.');
+        return;
+      }
+
+      const authCall =
+        mode === 'signup'
+          ? supabase.auth.signUp({ email, password })
+          : supabase.auth.signInWithPassword({ email, password });
+      const { error } = await authCall;
+      if (error) throw error;
+      setAuthMessage(mode === 'signup' ? 'Conta criada. Confirme o e-mail se o Supabase solicitar.' : 'Login realizado.');
+    } catch (error) {
+      setAuthMessage(error.message || 'Não foi possível autenticar. Confira e-mail e senha.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (authLoading) {
+    return (
+      <section className="rounded-lg border border-line bg-white p-6 shadow-sm">
+        <p className="text-sm text-slate-500">Carregando sessão...</p>
+      </section>
+    );
+  }
+
+  if (!isSupabaseConfigured) {
+    return (
+      <section className="rounded-lg border border-line bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold">Login e sincronização</h2>
+        <p className="mt-2 text-sm text-slate-500">
+          O app continua funcionando com localStorage. Configure `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` para ativar login e nuvem.
+        </p>
+      </section>
+    );
+  }
+
+  if (session?.user) {
+    return (
+      <section className="grid gap-6 xl:grid-cols-[420px_1fr]">
+        <article className="rounded-lg border border-line bg-white p-6 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="grid h-11 w-11 place-items-center rounded-lg bg-emerald-50 text-emerald-700">
+              <User size={22} />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold">Conta conectada</h2>
+              <p className="mt-1 text-sm text-slate-500">{session.user.email}</p>
+            </div>
+          </div>
+          <div className="mt-5 space-y-3">
+            <button
+              onClick={migrateLocalDataToCloud}
+              disabled={cloudLoading}
+              className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Upload size={18} /> Migrar dados locais para minha conta
+            </button>
+            <button onClick={signOut} className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-lg border border-line px-4 py-3 font-semibold">
+              <LogOut size={18} /> Sair
+            </button>
+          </div>
+        </article>
+        <article className="rounded-lg border border-line bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold">Sincronização</h2>
+          <p className="mt-2 text-sm text-slate-500">
+            Quando você está logado, os dados são salvos no Supabase e também continuam no localStorage como backup local.
+          </p>
+          <div className="mt-5 rounded-lg bg-slate-50 p-4 text-sm text-slate-700">{syncMessage || 'Aguardando alterações.'}</div>
+        </article>
+      </section>
+    );
+  }
+
+  return (
+    <section className="grid gap-6 xl:grid-cols-[420px_1fr]">
+      <form onSubmit={submitAuth} className="rounded-lg border border-line bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold">{mode === 'login' ? 'Entrar' : 'Criar conta'}</h2>
+        <p className="mt-1 text-sm text-slate-500">O login fica separado do painel principal. Sem login, o app segue usando localStorage.</p>
+        <div className="mt-5 grid gap-4">
+          <Field label="E-mail">
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="input" required />
+          </Field>
+          <Field label="Senha">
+            <input type="password" minLength="6" value={password} onChange={(event) => setPassword(event.target.value)} className="input" required />
+          </Field>
+          {authMessage && <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{authMessage}</div>}
+          <button disabled={submitting} className="inline-flex min-h-12 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-3 font-semibold text-white disabled:opacity-60">
+            <User size={18} /> {submitting ? 'Aguarde...' : mode === 'login' ? 'Entrar' : 'Criar conta'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMode(mode === 'login' ? 'signup' : 'login');
+              setAuthMessage('');
+            }}
+            className="text-sm font-semibold text-emerald-700"
+          >
+            {mode === 'login' ? 'Criar uma nova conta' : 'Já tenho conta'}
+          </button>
+        </div>
+      </form>
+      <article className="rounded-lg border border-line bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold">Modo sem login</h2>
+        <p className="mt-2 text-sm text-slate-500">
+          Dados salvos apenas neste dispositivo. Faça login para sincronizar com Supabase quando quiser.
+        </p>
+      </article>
+    </section>
   );
 }
 

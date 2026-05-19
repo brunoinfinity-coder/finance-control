@@ -39,9 +39,9 @@ Gere o build de produção:
 npm run build
 ```
 
-## Dados locais
+## Dados locais e nuvem
 
-Nesta fase, todos os dados são salvos no `localStorage` do navegador. Não há banco de dados, login, integração bancária, pagamentos ou Supabase em produção ainda.
+O app continua funcionando com `localStorage` quando não há login ou quando Supabase não está configurado. Com login ativo, os dados são sincronizados com Supabase e o `localStorage` continua como backup local.
 
 ## Deploy na Netlify
 
@@ -53,18 +53,25 @@ Configuração prevista:
 
 O arquivo `netlify.toml` já deixa essa configuração preparada.
 
-## Próxima fase: Supabase
-
-Supabase será preparado em uma próxima etapa para persistência remota e autenticação, mas ainda não está integrado nesta versão.
-
-Variáveis previstas:
+Para ativar Supabase na Netlify, cadastre em `Site configuration > Environment variables`:
 
 ```bash
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
 ```
 
-Use somente a `anon key` no frontend. Nunca use `service_role key` no código do cliente.
+Depois faça novo deploy.
+
+## Supabase
+
+Crie um arquivo `.env.local` com:
+
+```bash
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
+
+Use somente a `anon key` no frontend. Nunca use `service_role key` no código do cliente. O SQL e as policies RLS estão documentados em `SUPABASE_SETUP.md`.
 
 ## Segurança
 

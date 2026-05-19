@@ -9,12 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.106.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.7",
+    "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "recharts": "^2.15.0",
-    "lucide-react": "^0.468.0"
+    "vite": "^6.0.7"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.20",
