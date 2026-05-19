@@ -627,6 +627,7 @@ function App() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [expenseFilters, setExpenseFilters] = useState({ category: '', paymentMethod: '' });
   const [editingExpenseId, setEditingExpenseId] = useState(null);
+  const [editingBillId, setEditingBillId] = useState(null);
   const [quickExpense, setQuickExpense] = useState({
     date: TODAY,
     description: '',
@@ -728,6 +729,16 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [account, categories, cloudLoaded, entries, fixedBills, monthlyRevenue, planning, session?.user?.id]);
 
+  useEffect(() => {
+    if (!session?.user || !supabase || !cloudLoaded) return undefined;
+
+    const interval = window.setInterval(() => {
+      saveCurrentStateToCloud();
+    }, 60000);
+
+    return () => window.clearInterval(interval);
+  }, [account, categories, cloudLoaded, entries, fixedBills, monthlyRevenue, planning, session?.user?.id]);
+
   async function loadCloudData(userId) {
     setCloudLoading(true);
     setCloudLoaded(false);
@@ -824,6 +835,18 @@ function App() {
       setSaveStatus('error');
       setSyncMessage(`Erro ao salvar: ${error.message}`);
     }
+  }
+
+  function saveCurrentStateToCloud() {
+    if (!session?.user || !supabase || !cloudLoaded) {
+      setSaveStatus(session?.user ? 'loading' : 'local');
+      setSyncMessage(session?.user ? 'Aguarde o carregamento da nuvem terminar antes de salvar.' : 'Modo local: faça login para salvar online.');
+      return;
+    }
+
+    const snapshot = localSnapshotFromState({ entries, fixedBills, account, planning, categories, monthlyRevenue });
+    const serialized = JSON.stringify(snapshot);
+    saveCloudData(session.user.id, snapshot, serialized);
   }
 
   async function syncRowsById(table, rows, userId) {
@@ -991,6 +1014,27 @@ function App() {
     const value = parseMoney(billForm.value);
     if (!billForm.name.trim() || value <= 0) return;
 
+    if (editingBillId) {
+      setFixedBills((current) =>
+        current.map((bill) =>
+          bill.id === editingBillId
+            ? {
+                ...bill,
+                name: billForm.name.trim(),
+                value,
+                dueDay: Math.min(Math.max(Number(billForm.dueDay || 1), 1), 31),
+                category: billForm.category || 'Outros',
+                recurring: Boolean(billForm.recurring),
+                active: Boolean(billForm.active),
+              }
+            : bill,
+        ),
+      );
+      setEditingBillId(null);
+      setBillForm({ name: '', value: '', dueDay: '10', category: 'Outros', recurring: true, active: true });
+      return;
+    }
+
     setFixedBills((current) => [
       ...current,
       {
@@ -1005,6 +1049,23 @@ function App() {
         paidMonths: {},
       },
     ]);
+    setBillForm({ name: '', value: '', dueDay: '10', category: 'Outros', recurring: true, active: true });
+  }
+
+  function editFixedBill(bill) {
+    setEditingBillId(bill.id);
+    setBillForm({
+      name: bill.name,
+      value: String(bill.value).replace('.', ','),
+      dueDay: String(bill.dueDay),
+      category: bill.category || 'Outros',
+      recurring: bill.recurring !== false,
+      active: bill.active !== false,
+    });
+  }
+
+  function cancelBillEdit() {
+    setEditingBillId(null);
     setBillForm({ name: '', value: '', dueDay: '10', category: 'Outros', recurring: true, active: true });
   }
 
@@ -1102,7 +1163,14 @@ function App() {
         </header>
 
         <div className="space-y-7 px-4 py-6 md:px-8 lg:py-8">
-          <PageTitle activeView={activeView} selectedMonth={selectedMonth} session={session} saveStatus={saveStatus} syncMessage={syncMessage} />
+          <PageTitle
+            activeView={activeView}
+            selectedMonth={selectedMonth}
+            session={session}
+            saveStatus={saveStatus}
+            syncMessage={syncMessage}
+            saveCurrentStateToCloud={saveCurrentStateToCloud}
+          />
 
           {activeView === 'dashboard' && <Dashboard stats={monthStats} selectedMonth={selectedMonth} />}
           {activeView === 'receita' && (
@@ -1144,8 +1212,11 @@ function App() {
               billForm={billForm}
               setBillForm={setBillForm}
               addFixedBill={addFixedBill}
+              editingBillId={editingBillId}
+              cancelBillEdit={cancelBillEdit}
               categories={categories}
               setBillPaid={setBillPaid}
+              editFixedBill={editFixedBill}
               removeFixedBill={removeFixedBill}
             />
           )}
@@ -1159,6 +1230,7 @@ function App() {
               setAuthMessage={setAuthMessage}
               syncMessage={syncMessage}
               migrateLocalDataToCloud={migrateLocalDataToCloud}
+              saveCurrentStateToCloud={saveCurrentStateToCloud}
               signOut={signOut}
             />
           )}
@@ -1167,6 +1239,7 @@ function App() {
               session={session}
               saveStatus={saveStatus}
               syncMessage={syncMessage}
+              saveCurrentStateToCloud={saveCurrentStateToCloud}
               importMessage={importMessage}
               exportData={exportData}
               importData={importData}
@@ -1252,7 +1325,7 @@ function Navigation({ activeView, setActiveView, compact = false }) {
   );
 }
 
-function PageTitle({ activeView, selectedMonth, session, saveStatus, syncMessage }) {
+function PageTitle({ activeView, selectedMonth, session, saveStatus, syncMessage, saveCurrentStateToCloud }) {
   const titles = {
     dashboard: 'Dashboard',
     receita: 'Receita',
@@ -1273,6 +1346,11 @@ function PageTitle({ activeView, selectedMonth, session, saveStatus, syncMessage
         <p className="text-sm text-slate-500">
           {session?.user ? syncMessage || 'Dados salvos online no Supabase.' : 'Modo local: faça login para salvar online.'}
         </p>
+        {session?.user && (
+          <button onClick={saveCurrentStateToCloud} className="btn-secondary min-h-10 px-3 py-2 text-xs">
+            <Upload size={15} /> Salvar na nuvem
+          </button>
+        )}
       </div>
     </section>
   );
@@ -1544,12 +1622,12 @@ function Expenses({
   );
 }
 
-function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, categories, setBillPaid, removeFixedBill }) {
+function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, editingBillId, cancelBillEdit, categories, setBillPaid, editFixedBill, removeFixedBill }) {
   const commitment = stats.cashRevenue > 0 ? (stats.billsTotal / stats.cashRevenue) * 100 : 0;
 
   return (
     <div className="grid gap-5 xl:grid-cols-[390px_1fr]">
-      <Panel title="Nova conta" subtitle="Cadastre contas fixas ou pontuais">
+      <Panel title={editingBillId ? 'Editar conta' : 'Nova conta'} subtitle="Marque recorrente para aparecer nos próximos meses">
         <form onSubmit={addFixedBill} className="grid gap-4">
           <Field label="Nome da conta">
             <input value={billForm.name} onChange={(event) => setBillForm({ ...billForm, name: event.target.value })} className="input" required />
@@ -1563,9 +1641,16 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, cate
             <Toggle label="Recorrente" checked={billForm.recurring} onChange={(checked) => setBillForm({ ...billForm, recurring: checked })} />
             <Toggle label="Ativa" checked={billForm.active} onChange={(checked) => setBillForm({ ...billForm, active: checked })} />
           </div>
-          <button className="btn-primary">
-            <Plus size={17} /> Adicionar conta
-          </button>
+          <div className="flex gap-3">
+            <button className="btn-primary flex-1">
+              <Plus size={17} /> {editingBillId ? 'Salvar conta' : 'Adicionar conta'}
+            </button>
+            {editingBillId && (
+              <button type="button" onClick={cancelBillEdit} className="btn-secondary">
+                Cancelar
+              </button>
+            )}
+          </div>
         </form>
       </Panel>
 
@@ -1582,11 +1667,12 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, cate
         <Panel title="Contas do mês" subtitle="Marque pago ou pendente com um clique">
           <div className="space-y-3">
             {stats.bills.map((bill) => (
-              <ListItem key={bill.id}>
+              <BillListItem key={bill.id} bill={bill}>
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="truncate font-semibold">{bill.name}</p>
                     <BillStatusBadge bill={bill} />
+                    {bill.recurring && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">Recorrente</span>}
                   </div>
                   <p className="text-sm text-slate-500">Dia {bill.dueDay} - {bill.category}</p>
                 </div>
@@ -1598,11 +1684,14 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, cate
                   <button onClick={() => setBillPaid(bill.id, selectedMonth, false)} className="btn-mini bg-amber-50 text-amber-700">
                     Pendente
                   </button>
+                  <button onClick={() => editFixedBill(bill)} className="btn-mini bg-slate-100 text-slate-700">
+                    Editar
+                  </button>
                   <IconButton label="Excluir" onClick={() => removeFixedBill(bill.id)} danger>
                     <Trash2 size={17} />
                   </IconButton>
                 </div>
-              </ListItem>
+              </BillListItem>
             ))}
             {!stats.bills.length && <EmptyState text="Nenhuma conta cadastrada para este mês." />}
           </div>
@@ -1612,7 +1701,7 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, cate
   );
 }
 
-function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage, setAuthMessage, syncMessage, migrateLocalDataToCloud, signOut }) {
+function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage, setAuthMessage, syncMessage, migrateLocalDataToCloud, saveCurrentStateToCloud, signOut }) {
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -1664,6 +1753,9 @@ function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage
             <button onClick={migrateLocalDataToCloud} disabled={cloudLoading} className="btn-primary w-full">
               <Upload size={18} /> Migrar dados locais para minha conta
             </button>
+            <button onClick={saveCurrentStateToCloud} disabled={cloudLoading} className="btn-secondary w-full">
+              <Upload size={18} /> Salvar aplicação inteira na nuvem
+            </button>
             <button onClick={signOut} className="btn-secondary w-full">
               <LogOut size={18} /> Sair
             </button>
@@ -1712,7 +1804,7 @@ function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage
   );
 }
 
-function SettingsPanel({ session, saveStatus, syncMessage, importMessage, exportData, importData, clearLocalData, fileInputRef }) {
+function SettingsPanel({ session, saveStatus, syncMessage, importMessage, exportData, importData, clearLocalData, saveCurrentStateToCloud, fileInputRef }) {
   return (
     <section className="grid gap-5 xl:grid-cols-3">
       <Panel title="Backup" subtitle="Importação e exportação JSON">
@@ -1720,6 +1812,11 @@ function SettingsPanel({ session, saveStatus, syncMessage, importMessage, export
           <button onClick={exportData} className="btn-primary w-full">
             <Download size={18} /> Exportar dados
           </button>
+          {session?.user && (
+            <button onClick={saveCurrentStateToCloud} className="btn-secondary w-full">
+              <Upload size={18} /> Salvar aplicação inteira na nuvem
+            </button>
+          )}
           <button onClick={() => fileInputRef.current?.click()} className="btn-secondary w-full">
             <Upload size={18} /> Importar JSON
           </button>
@@ -1794,27 +1891,61 @@ function ListItem({ children }) {
   return <div className="flex flex-col gap-3 rounded-3xl border border-slate-100 bg-white p-4 shadow-sm md:flex-row md:items-center md:justify-between">{children}</div>;
 }
 
+function BillListItem({ bill, children }) {
+  const status = statusForDueDate(bill.dueDate, bill.status === 'Pago');
+  const className = {
+    green: 'border-emerald-200 bg-emerald-50/80 shadow-emerald-900/5',
+    red: 'border-rose-300 bg-rose-50 shadow-rose-900/10',
+    amber: 'border-amber-300 bg-amber-50 shadow-amber-900/10',
+    slate: 'border-slate-100 bg-white shadow-slate-900/5',
+  }[status.tone];
+
+  return <div className={`flex flex-col gap-3 rounded-3xl border p-4 shadow-sm md:flex-row md:items-center md:justify-between ${className}`}>{children}</div>;
+}
+
 function BillStatusBadge({ bill }) {
   const status = statusForDueDate(bill.dueDate, bill.status === 'Pago');
   const Icon = status.icon;
   const className = {
-    green: 'bg-emerald-50 text-emerald-700',
-    red: 'bg-rose-50 text-rose-700',
-    amber: 'bg-amber-50 text-amber-700',
+    green: 'bg-emerald-600 text-white',
+    red: 'bg-rose-600 text-white',
+    amber: 'bg-amber-500 text-white',
     slate: 'bg-slate-100 text-slate-700',
   }[status.tone];
 
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold shadow-sm ${className}`}>
       <Icon size={14} /> {status.label}
     </span>
   );
 }
 
 function MoneyField({ label, value, onChange, raw = false }) {
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState('');
+  const displayValue = raw || focused ? draft : value || '';
+
+  useEffect(() => {
+    if (!focused) setDraft(value === 0 || value ? String(value).replace('.', ',') : '');
+  }, [focused, value]);
+
   return (
     <Field label={label}>
-      <input inputMode="decimal" value={raw ? value : value || ''} onChange={(event) => onChange(event.target.value)} className="input" placeholder="0,00" />
+      <input
+        inputMode="decimal"
+        value={displayValue}
+        onFocus={() => {
+          setFocused(true);
+          setDraft(value === 0 || value ? String(value).replace('.', ',') : '');
+        }}
+        onBlur={() => setFocused(false)}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          onChange(event.target.value);
+        }}
+        className="input"
+        placeholder="0,00"
+      />
     </Field>
   );
 }
