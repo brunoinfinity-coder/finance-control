@@ -366,16 +366,15 @@ function fixedBillRows(fixedBills, userId) {
 function occurrenceRows(fixedBills, userId) {
   return fixedBills.flatMap((bill) =>
     Object.entries(bill.paidMonths || {})
-      .filter(([, paid]) => paid)
-      .map(([month]) => {
+      .map(([month, paid]) => {
         const { year, monthNumber } = splitMonth(month);
         return {
           user_id: userId,
           fixed_bill_id: bill.id,
           year,
           month: monthNumber,
-          status: 'paid',
-          paid_at: new Date().toISOString(),
+          status: paid ? 'paid' : 'pending',
+          paid_at: paid ? new Date().toISOString() : null,
         };
       }),
   );
@@ -523,11 +522,14 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account })
   const foodOutflows = sumBy(revenue.foodCardOutflows || []);
   const foodExpenses = sumBy(paidExpenses, (entry) => entry.paymentMethod === 'Alimentação');
   const cashExpenses = sumBy(paidExpenses, (entry) => entry.paymentMethod !== 'Alimentação');
+  const cashAffectingExpenses = sumBy(paidExpenses, (entry) => ['Débito', 'Pix', 'Dinheiro', 'Boleto'].includes(entry.paymentMethod));
+  const creditExpenses = sumBy(paidExpenses, (entry) => entry.paymentMethod === 'Crédito');
   const billsTotal = sumBy(bills);
   const paidBills = sumBy(bills, (bill) => bill.status === 'Pago');
   const pendingBills = sumBy(bills, (bill) => bill.status !== 'Pago');
   const foodBalance = foodRevenue - foodExpenses - foodOutflows;
-  const cashForecast = cashRevenue - billsTotal - cashExpenses;
+  const cashForecast = cashRevenue - billsTotal;
+  const cashPosition = Number(account.currentBalance || 0) - pendingBills;
 
   const byPayment = PAYMENT_METHODS.map((method) => ({
     name: method,
@@ -550,11 +552,14 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account })
     foodOutflows,
     foodExpenses,
     cashExpenses,
+    cashAffectingExpenses,
+    creditExpenses,
     billsTotal,
     paidBills,
     pendingBills,
     foodBalance,
     cashForecast,
+    cashPosition,
     accountBalance: Number(account.currentBalance || 0),
     byPayment,
     byCategory,
@@ -651,9 +656,11 @@ function App() {
   const [authLoading, setAuthLoading] = useState(isSupabaseConfigured);
   const [cloudLoading, setCloudLoading] = useState(false);
   const [cloudLoaded, setCloudLoaded] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(isSupabaseConfigured ? 'loading' : 'local');
   const [syncMessage, setSyncMessage] = useState('');
   const [authMessage, setAuthMessage] = useState('');
   const [localMigrationSnapshot, setLocalMigrationSnapshot] = useState(null);
+  const lastSavedSnapshotRef = useRef('');
   const fileInputRef = useRef(null);
 
   const monthStats = useMemo(
@@ -681,12 +688,14 @@ function App() {
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
       setSession(data.session);
+      if (!data.session) setSaveStatus('local');
       setAuthLoading(false);
     });
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       setCloudLoaded(false);
+      setSaveStatus(nextSession ? 'loading' : 'local');
       setAuthMessage('');
     });
 
@@ -699,6 +708,7 @@ function App() {
   useEffect(() => {
     if (!session?.user || !supabase) {
       setCloudLoaded(false);
+      setSaveStatus('local');
       return;
     }
 
@@ -707,9 +717,12 @@ function App() {
 
   useEffect(() => {
     if (!session?.user || !supabase || !cloudLoaded) return undefined;
+    const snapshot = localSnapshotFromState({ entries, fixedBills, account, planning, categories, monthlyRevenue });
+    const serialized = JSON.stringify(snapshot);
+    if (serialized === lastSavedSnapshotRef.current) return undefined;
 
     const timeout = window.setTimeout(() => {
-      saveCloudData(session.user.id, localSnapshotFromState({ entries, fixedBills, account, planning, categories, monthlyRevenue }));
+      saveCloudData(session.user.id, snapshot, serialized);
     }, CLOUD_SAVE_DELAY);
 
     return () => window.clearTimeout(timeout);
@@ -717,6 +730,8 @@ function App() {
 
   async function loadCloudData(userId) {
     setCloudLoading(true);
+    setCloudLoaded(false);
+    setSaveStatus('loading');
     setSyncMessage('Carregando dados da nuvem...');
     setLocalMigrationSnapshot((current) => current || loadData());
 
@@ -767,13 +782,18 @@ function App() {
         setPlanning(cloudState.planning);
         setCategories(cloudState.categories);
         setMonthlyRevenue(cloudState.monthlyRevenue);
+        lastSavedSnapshotRef.current = JSON.stringify(cloudState);
+        setSaveStatus('saved');
         setSyncMessage('Dados carregados do Supabase.');
       } else {
-        setSyncMessage('Conta sem dados na nuvem. Use a migração para enviar seus dados locais.');
+        lastSavedSnapshotRef.current = '';
+        setSaveStatus('saved');
+        setSyncMessage('Conta sem dados na nuvem. As próximas alterações serão salvas online.');
       }
 
       setCloudLoaded(true);
     } catch (error) {
+      setSaveStatus('error');
       setSyncMessage(`Não foi possível carregar do Supabase: ${error.message}`);
       setCloudLoaded(false);
     } finally {
@@ -781,49 +801,77 @@ function App() {
     }
   }
 
-  async function saveCloudData(userId, snapshot) {
+  async function saveCloudData(userId, snapshot, serializedSnapshot = JSON.stringify(snapshot)) {
+    if (!cloudLoaded && serializedSnapshot !== lastSavedSnapshotRef.current) return;
+
     try {
-      setSyncMessage('Sincronizando...');
+      setSaveStatus('saving');
+      setSyncMessage('Salvando...');
 
       const settingsResult = await supabase.from('financial_settings').upsert(settingsFromAccount(snapshot.account, userId), { onConflict: 'user_id' });
       if (settingsResult.error) throw settingsResult.error;
 
-      await replaceUserRows('categories', categoryRows(snapshot.categories, userId), userId);
-      await replaceUserRows('quick_expenses', entryRows(snapshot.entries, userId), userId);
-      await replaceUserRows('monthly_planning', planningRows(snapshot.planning, userId), userId);
-      await replaceUserRows('monthly_revenue', monthlyRevenueRows(snapshot.monthlyRevenue, userId), userId);
-      await replaceFixedBills(snapshot.fixedBills, userId);
+      await syncCategories(snapshot.categories, userId);
+      await syncRowsById('quick_expenses', entryRows(snapshot.entries, userId), userId);
+      await syncMonthlyRows('monthly_planning', planningRows(snapshot.planning, userId), userId);
+      await syncMonthlyRows('monthly_revenue', monthlyRevenueRows(snapshot.monthlyRevenue, userId), userId);
+      await syncFixedBills(snapshot.fixedBills, userId);
 
-      setSyncMessage('Dados sincronizados com Supabase.');
+      lastSavedSnapshotRef.current = serializedSnapshot;
+      setSaveStatus('saved');
+      setSyncMessage('Salvo na nuvem.');
     } catch (error) {
-      setSyncMessage(`Falha ao sincronizar: ${error.message}`);
+      setSaveStatus('error');
+      setSyncMessage(`Erro ao salvar: ${error.message}`);
     }
   }
 
-  async function replaceUserRows(table, rows, userId) {
+  async function syncRowsById(table, rows, userId) {
+    if (rows.length) {
+      const upsertResult = await supabase.from(table).upsert(rows, { onConflict: 'id' });
+      if (upsertResult.error) throw upsertResult.error;
+      const ids = rows.map((row) => row.id);
+      const deleteResult = await supabase.from(table).delete().eq('user_id', userId).not('id', 'in', `(${ids.join(',')})`);
+      if (deleteResult.error) throw deleteResult.error;
+      return;
+    }
+
     const deleteResult = await supabase.from(table).delete().eq('user_id', userId);
     if (deleteResult.error) throw deleteResult.error;
-    if (!rows.length) return;
-    const insertResult = await supabase.from(table).insert(rows);
-    if (insertResult.error) throw insertResult.error;
   }
 
-  async function replaceFixedBills(rows, userId) {
-    const occurrencesDelete = await supabase.from('fixed_bill_occurrences').delete().eq('user_id', userId);
-    if (occurrencesDelete.error) throw occurrencesDelete.error;
-    const billsDelete = await supabase.from('fixed_bills').delete().eq('user_id', userId);
-    if (billsDelete.error) throw billsDelete.error;
+  async function syncMonthlyRows(table, rows, userId) {
+    if (!rows.length) return;
+    const upsertResult = await supabase.from(table).upsert(rows, { onConflict: 'user_id,year,month' });
+    if (upsertResult.error) throw upsertResult.error;
+  }
 
+  async function syncCategories(rows, userId) {
+    const payload = categoryRows(rows, userId);
+    if (!payload.length) return;
+    const upsertResult = await supabase.from('categories').upsert(payload, { onConflict: 'user_id,name' });
+    if (upsertResult.error) throw upsertResult.error;
+  }
+
+  async function syncFixedBills(rows, userId) {
     const bills = fixedBillRows(rows, userId);
     if (bills.length) {
-      const billsInsert = await supabase.from('fixed_bills').insert(bills);
-      if (billsInsert.error) throw billsInsert.error;
+      const billsUpsert = await supabase.from('fixed_bills').upsert(bills, { onConflict: 'id' });
+      if (billsUpsert.error) throw billsUpsert.error;
+      const ids = bills.map((bill) => bill.id);
+      const billsDelete = await supabase.from('fixed_bills').delete().eq('user_id', userId).not('id', 'in', `(${ids.join(',')})`);
+      if (billsDelete.error) throw billsDelete.error;
+    } else {
+      const billsDelete = await supabase.from('fixed_bills').delete().eq('user_id', userId);
+      if (billsDelete.error) throw billsDelete.error;
     }
 
     const occurrences = occurrenceRows(rows, userId);
     if (occurrences.length) {
-      const occurrencesInsert = await supabase.from('fixed_bill_occurrences').insert(occurrences);
-      if (occurrencesInsert.error) throw occurrencesInsert.error;
+      const occurrencesUpsert = await supabase
+        .from('fixed_bill_occurrences')
+        .upsert(occurrences, { onConflict: 'user_id,fixed_bill_id,year,month' });
+      if (occurrencesUpsert.error) throw occurrencesUpsert.error;
     }
   }
 
@@ -842,6 +890,7 @@ function App() {
     await supabase.auth.signOut();
     setSession(null);
     setCloudLoaded(false);
+    setSaveStatus('local');
     setSyncMessage('Você saiu. Os dados locais continuam disponíveis neste dispositivo.');
   }
 
@@ -1053,7 +1102,7 @@ function App() {
         </header>
 
         <div className="space-y-7 px-4 py-6 md:px-8 lg:py-8">
-          <PageTitle activeView={activeView} selectedMonth={selectedMonth} session={session} syncMessage={syncMessage} />
+          <PageTitle activeView={activeView} selectedMonth={selectedMonth} session={session} saveStatus={saveStatus} syncMessage={syncMessage} />
 
           {activeView === 'dashboard' && <Dashboard stats={monthStats} selectedMonth={selectedMonth} />}
           {activeView === 'receita' && (
@@ -1105,6 +1154,7 @@ function App() {
               session={session}
               authLoading={authLoading}
               cloudLoading={cloudLoading}
+              saveStatus={saveStatus}
               authMessage={authMessage}
               setAuthMessage={setAuthMessage}
               syncMessage={syncMessage}
@@ -1115,6 +1165,7 @@ function App() {
           {activeView === 'configuracoes' && (
             <SettingsPanel
               session={session}
+              saveStatus={saveStatus}
               syncMessage={syncMessage}
               importMessage={importMessage}
               exportData={exportData}
@@ -1201,7 +1252,7 @@ function Navigation({ activeView, setActiveView, compact = false }) {
   );
 }
 
-function PageTitle({ activeView, selectedMonth, session, syncMessage }) {
+function PageTitle({ activeView, selectedMonth, session, saveStatus, syncMessage }) {
   const titles = {
     dashboard: 'Dashboard',
     receita: 'Receita',
@@ -1217,11 +1268,28 @@ function PageTitle({ activeView, selectedMonth, session, syncMessage }) {
         <p className="text-sm font-medium capitalize text-slate-500">{monthLabel(selectedMonth)}</p>
         <h1 className="text-3xl font-semibold tracking-tight text-slate-950 md:text-4xl">{titles[activeView]}</h1>
       </div>
-      <p className="max-w-xl text-sm text-slate-500">
-        {session?.user ? `Conectado como ${session.user.email}. ${syncMessage || 'Sincronização ativa.'}` : 'Dados salvos apenas neste dispositivo. Faça login para sincronizar.'}
-      </p>
+      <div className="flex max-w-xl flex-col items-start gap-2 md:items-end">
+        <SaveStatusBadge session={session} saveStatus={saveStatus} />
+        <p className="text-sm text-slate-500">
+          {session?.user ? syncMessage || 'Dados salvos online no Supabase.' : 'Modo local: faça login para salvar online.'}
+        </p>
+      </div>
     </section>
   );
+}
+
+function SaveStatusBadge({ session, saveStatus }) {
+  const config = !session?.user
+    ? { label: 'Modo local', className: 'bg-slate-100 text-slate-700' }
+    : {
+        loading: { label: 'Carregando nuvem', className: 'bg-blue-50 text-blue-700' },
+        saving: { label: 'Salvando...', className: 'bg-amber-50 text-amber-700' },
+        saved: { label: 'Salvo na nuvem', className: 'bg-emerald-50 text-emerald-700' },
+        error: { label: 'Erro ao salvar', className: 'bg-rose-50 text-rose-700' },
+        local: { label: 'Modo local', className: 'bg-slate-100 text-slate-700' },
+      }[saveStatus] || { label: 'Online com Supabase', className: 'bg-emerald-50 text-emerald-700' };
+
+  return <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${config.className}`}>{config.label}</span>;
 }
 
 function Dashboard({ stats, selectedMonth }) {
@@ -1233,12 +1301,15 @@ function Dashboard({ stats, selectedMonth }) {
   return (
     <div className="space-y-5">
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <SummaryCard title="Receita" value={money(stats.cashRevenue)} detail={`Alimentação: ${money(stats.foodRevenue)}`} icon={ArrowUpCircle} tone="green" />
-        <SummaryCard title="Gastos" value={money(sumBy(stats.paidExpenses))} detail={`Dinheiro: ${money(stats.cashExpenses)} | Alimentação: ${money(stats.foodExpenses)}`} icon={ArrowDownCircle} tone="red" />
-        <SummaryCard title="Contas" value={money(stats.billsTotal)} detail={`${money(stats.paidBills)} pagas | ${money(stats.pendingBills)} pendentes`} icon={ReceiptText} tone="amber" />
-        <SummaryCard title="Saldo atual" value={money(stats.accountBalance)} detail="Informado manualmente" icon={Wallet} tone="slate" />
-        <SummaryCard title="Sobra prevista" value={money(stats.cashForecast)} detail="Receita em dinheiro - contas - gastos em dinheiro" icon={PiggyBank} tone={stats.cashForecast >= 0 ? 'green' : 'red'} />
-        <SummaryCard title="Alimentação" value={money(stats.foodBalance)} detail={`${money(stats.foodExpenses + stats.foodOutflows)} usado/retirado`} icon={WalletCards} tone={stats.foodBalance >= 0 ? 'blue' : 'red'} />
+        <SummaryCard title="Receita em dinheiro" value={money(stats.cashRevenue)} detail="Não considera cartão alimentação." icon={ArrowUpCircle} tone="green" />
+        <SummaryCard title="Total de contas" value={money(stats.billsTotal)} detail="Baseado apenas nas contas do mês." icon={ReceiptText} tone="amber" />
+        <SummaryCard title="Sobra prevista" value={money(stats.cashForecast)} detail="Receita em dinheiro - total de contas." icon={PiggyBank} tone={stats.cashForecast >= 0 ? 'green' : 'red'} />
+        <SummaryCard title="Saldo atual da conta" value={money(stats.accountBalance)} detail="Campo manual, não recalculado por crédito." icon={Wallet} tone="slate" />
+        <SummaryCard title="Posição de caixa" value={money(stats.cashPosition)} detail="Saldo atual - contas pendentes." icon={CircleDollarSign} tone={stats.cashPosition >= 0 ? 'green' : 'red'} />
+        <SummaryCard title="Gastos do mês" value={money(sumBy(stats.paidExpenses))} detail="Gastos são informativos." icon={ArrowDownCircle} tone="red" />
+        <SummaryCard title="Gastos que afetam caixa" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto." icon={Wallet} tone="slate" />
+        <SummaryCard title="Crédito usado" value={money(stats.creditExpenses)} detail="Informativo; não reduz saldo atual automaticamente." icon={CreditCard} tone="blue" />
+        <SummaryCard title="Saldo alimentação" value={money(stats.foodBalance)} detail="Recebido - usado - saídas manuais." icon={WalletCards} tone={stats.foodBalance >= 0 ? 'blue' : 'red'} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
@@ -1246,7 +1317,9 @@ function Dashboard({ stats, selectedMonth }) {
           <div className="grid gap-3 sm:grid-cols-2">
             <MiniRow label="Receita em dinheiro" value={money(stats.cashRevenue)} positive />
             <MiniRow label="Receita alimentação" value={money(stats.foodRevenue)} positive />
-            <MiniRow label="Gastos em dinheiro" value={money(stats.cashExpenses)} />
+            <MiniRow label="Sobra prevista" value={money(stats.cashForecast)} positive={stats.cashForecast >= 0} />
+            <MiniRow label="Posição de caixa" value={money(stats.cashPosition)} positive={stats.cashPosition >= 0} />
+            <MiniRow label="Gastos que afetam caixa" value={money(stats.cashAffectingExpenses)} />
             <MiniRow label="Gastos alimentação" value={money(stats.foodExpenses)} />
             <MiniRow label="Contas pagas" value={money(stats.paidBills)} positive />
             <MiniRow label="Contas pendentes" value={money(stats.pendingBills)} />
@@ -1429,13 +1502,17 @@ function Expenses({
         <section className="grid gap-4 md:grid-cols-3">
           <SummaryCard title="Total gasto" value={money(sumBy(stats.paidExpenses))} detail={`${stats.expenses.length} lançamentos`} icon={CreditCard} tone="slate" compact />
           <SummaryCard title="Crédito" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Crédito'))} detail="Pago no crédito" icon={CreditCard} tone="blue" compact />
-          <SummaryCard title="Alimentação" value={money(stats.foodExpenses)} detail="Não reduz dinheiro livre" icon={WalletCards} tone="green" compact />
           <SummaryCard title="Débito" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Débito'))} detail="Conta corrente" icon={Wallet} tone="slate" compact />
           <SummaryCard title="Pix" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Pix'))} detail="Conta corrente" icon={CircleDollarSign} tone="slate" compact />
+          <SummaryCard title="Dinheiro" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Dinheiro'))} detail="Saída de caixa" icon={CircleDollarSign} tone="slate" compact />
+          <SummaryCard title="Boleto" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Boleto'))} detail="Saída de caixa" icon={ReceiptText} tone="amber" compact />
+          <SummaryCard title="Alimentação" value={money(stats.foodExpenses)} detail="Reduz saldo alimentação" icon={WalletCards} tone="green" compact />
+          <SummaryCard title="Afeta caixa" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto" icon={Wallet} tone="slate" compact />
+          <SummaryCard title="Não afeta caixa agora" value={money(stats.creditExpenses)} detail="Crédito é informativo" icon={CreditCard} tone="blue" compact />
           <SummaryCard title="Maior categoria" value={stats.largestCategory?.name || 'Sem dados'} detail={stats.largestCategory ? money(stats.largestCategory.value) : 'Nenhum gasto'} icon={ReceiptText} tone="amber" compact />
         </section>
 
-        <Panel title="Lançamentos do mês" subtitle="Lista limpa, sem aparência de planilha">
+        <Panel title="Lançamentos do mês" subtitle="Gastos no crédito são informativos e não reduzem o saldo atual automaticamente.">
           <div className="mb-5 grid gap-3 md:grid-cols-2">
             <FilterSelect value={filters.category} options={categories} placeholder="Todas as categorias" onChange={(value) => setFilters({ ...filters, category: value })} />
             <FilterSelect value={filters.paymentMethod} options={PAYMENT_METHODS} placeholder="Todas as formas" onChange={(value) => setFilters({ ...filters, paymentMethod: value })} />
@@ -1535,7 +1612,7 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, cate
   );
 }
 
-function AuthPanel({ session, authLoading, cloudLoading, authMessage, setAuthMessage, syncMessage, migrateLocalDataToCloud, signOut }) {
+function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage, setAuthMessage, syncMessage, migrateLocalDataToCloud, signOut }) {
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -1593,6 +1670,9 @@ function AuthPanel({ session, authLoading, cloudLoading, authMessage, setAuthMes
           </div>
         </Panel>
         <Panel title="Sincronização" subtitle="Supabase + backup local">
+          <div className="mb-4">
+            <SaveStatusBadge session={session} saveStatus={saveStatus} />
+          </div>
           <p className="rounded-3xl bg-slate-50 p-4 text-sm text-slate-600">{syncMessage || 'Aguardando alterações.'}</p>
         </Panel>
       </section>
@@ -1632,7 +1712,7 @@ function AuthPanel({ session, authLoading, cloudLoading, authMessage, setAuthMes
   );
 }
 
-function SettingsPanel({ session, syncMessage, importMessage, exportData, importData, clearLocalData, fileInputRef }) {
+function SettingsPanel({ session, saveStatus, syncMessage, importMessage, exportData, importData, clearLocalData, fileInputRef }) {
   return (
     <section className="grid gap-5 xl:grid-cols-3">
       <Panel title="Backup" subtitle="Importação e exportação JSON">
@@ -1651,6 +1731,10 @@ function SettingsPanel({ session, syncMessage, importMessage, exportData, import
       <Panel title="Armazenamento" subtitle="Local e nuvem">
         <div className="space-y-3">
           <MiniRow label="Modo atual" value={session?.user ? 'Supabase + localStorage' : 'localStorage'} positive={Boolean(session?.user)} />
+          <div className="rounded-3xl border border-slate-100 bg-white px-4 py-3">
+            <span className="mb-2 block text-sm font-medium text-slate-500">Status</span>
+            <SaveStatusBadge session={session} saveStatus={saveStatus} />
+          </div>
           <MiniRow label="Usuário" value={session?.user?.email || 'Sem login'} />
           <p className="rounded-3xl bg-slate-50 p-3 text-sm text-slate-600">{syncMessage || 'Sem sincronização em andamento.'}</p>
         </div>
