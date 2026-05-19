@@ -1375,76 +1375,181 @@ function Dashboard({ stats, selectedMonth }) {
     { name: 'Pagas', value: stats.paidBills },
     { name: 'Pendentes', value: stats.pendingBills },
   ];
+  const cashMap = [
+    { name: 'Receita', value: stats.cashRevenue },
+    { name: 'Contas', value: stats.billsTotal },
+    { name: 'Sobra', value: Math.max(stats.cashForecast, 0) },
+  ];
+  const visiblePaymentData = stats.byPayment.filter((item) => item.value > 0);
+  const topCategories = [...stats.byCategory].sort((a, b) => b.value - a.value).slice(0, 5);
+  const upcomingBills = [...stats.bills]
+    .filter((bill) => bill.status !== 'Pago')
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+    .slice(0, 5);
+  const totalSpent = sumBy(stats.paidExpenses);
+  const billProgress = stats.billsTotal > 0 ? Math.min((stats.paidBills / stats.billsTotal) * 100, 100) : 0;
+  const forecastHealth = stats.cashForecast < 0 ? 'Atenção' : stats.cashPosition < 0 ? 'Caixa apertado' : 'Saudável';
+  const forecastTone = stats.cashForecast < 0 || stats.cashPosition < 0 ? 'text-amber-200' : 'text-emerald-200';
 
   return (
-    <div className="space-y-5">
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <SummaryCard title="Receita em dinheiro" value={money(stats.cashRevenue)} detail="Não considera cartão alimentação." icon={ArrowUpCircle} tone="green" />
-        <SummaryCard title="Total de contas" value={money(stats.billsTotal)} detail="Baseado apenas nas contas do mês." icon={ReceiptText} tone="amber" />
-        <SummaryCard title="Sobra prevista" value={money(stats.cashForecast)} detail="Receita em dinheiro - total de contas." icon={PiggyBank} tone={stats.cashForecast >= 0 ? 'green' : 'red'} />
-        <SummaryCard title="Saldo atual da conta" value={money(stats.accountBalance)} detail="Campo manual, não recalculado por crédito." icon={Wallet} tone="slate" />
-        <SummaryCard title="Posição de caixa" value={money(stats.cashPosition)} detail="Saldo atual - contas pendentes." icon={CircleDollarSign} tone={stats.cashPosition >= 0 ? 'green' : 'red'} />
-        <SummaryCard title="Gastos do mês" value={money(sumBy(stats.paidExpenses))} detail="Gastos são informativos." icon={ArrowDownCircle} tone="red" />
-        <SummaryCard title="Gastos que afetam caixa" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto." icon={Wallet} tone="slate" />
-        <SummaryCard title="Crédito usado" value={money(stats.creditExpenses)} detail="Informativo; não reduz saldo atual automaticamente." icon={CreditCard} tone="blue" />
-        <SummaryCard title="Saldo alimentação" value={money(stats.foodBalance)} detail="Recebido - usado - saídas manuais." icon={WalletCards} tone={stats.foodBalance >= 0 ? 'blue' : 'red'} />
-      </section>
-
-      <section className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-        <Panel title="Leitura do mês" subtitle={`Somente dados de ${selectedMonth}`}>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <MiniRow label="Receita em dinheiro" value={money(stats.cashRevenue)} positive />
-            <MiniRow label="Receita alimentação" value={money(stats.foodRevenue)} positive />
-            <MiniRow label="Sobra prevista" value={money(stats.cashForecast)} positive={stats.cashForecast >= 0} />
-            <MiniRow label="Posição de caixa" value={money(stats.cashPosition)} positive={stats.cashPosition >= 0} />
-            <MiniRow label="Gastos que afetam caixa" value={money(stats.cashAffectingExpenses)} />
-            <MiniRow label="Gastos alimentação" value={money(stats.foodExpenses)} />
-            <MiniRow label="Contas pagas" value={money(stats.paidBills)} positive />
-            <MiniRow label="Contas pendentes" value={money(stats.pendingBills)} />
+    <div className="space-y-6">
+      <section className="overflow-hidden rounded-[36px] bg-slate-950 p-6 text-white shadow-[0_30px_90px_rgba(15,23,42,0.20)] md:p-8">
+        <div className="grid gap-8 xl:grid-cols-[1.15fr_0.85fr] xl:items-end">
+          <div>
+            <div className="mb-8 inline-flex rounded-full bg-white/10 px-3 py-1 text-sm font-semibold text-white/80">
+              {monthLabel(selectedMonth)}
+            </div>
+            <p className={`text-sm font-semibold ${forecastTone}`}>{forecastHealth}</p>
+            <h2 className="mt-2 max-w-3xl text-4xl font-semibold tracking-tight md:text-6xl">
+              {money(stats.cashForecast)}
+            </h2>
+            <p className="mt-4 max-w-2xl text-base leading-7 text-white/65">
+              Sobra prevista por receita: dinheiro do mês menos contas do mês. Gastos e crédito ficam como leitura separada para não distorcer a previsão.
+            </p>
           </div>
-        </Panel>
 
-        <Panel title="Contas pagas vs pendentes" subtitle="Status das contas do mês">
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie data={billChart} dataKey="value" nameKey="name" innerRadius={54} outerRadius={84} paddingAngle={4}>
-                {billChart.map((_, index) => (
-                  <Cell key={index} fill={index === 0 ? '#16a34a' : '#f59e0b'} />
-                ))}
-              </Pie>
-              <Tooltip formatter={(value) => money(value)} />
-            </PieChart>
-          </ResponsiveContainer>
-        </Panel>
+          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
+            <HeroMini label="Receita dinheiro" value={money(stats.cashRevenue)} />
+            <HeroMini label="Contas do mês" value={money(stats.billsTotal)} />
+            <HeroMini label="Posição de caixa" value={money(stats.cashPosition)} />
+          </div>
+        </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-2">
-        <Panel title="Gastos por forma de pagamento" subtitle="Alimentação fica separada da sobra em dinheiro">
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={stats.byPayment}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <SummaryCard title="Receita em dinheiro" value={money(stats.cashRevenue)} detail="Salários + extras + outros." icon={ArrowUpCircle} tone="green" />
+        <SummaryCard title="Total de contas" value={money(stats.billsTotal)} detail={`${money(stats.pendingBills)} ainda pendente.`} icon={ReceiptText} tone="amber" />
+        <SummaryCard title="Saldo atual" value={money(stats.accountBalance)} detail="Campo manual da conta." icon={Wallet} tone="slate" />
+        <SummaryCard title="Alimentação" value={money(stats.foodBalance)} detail={`${money(stats.foodExpenses + stats.foodOutflows)} usado/retirado.`} icon={WalletCards} tone={stats.foodBalance >= 0 ? 'blue' : 'red'} />
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+        <Panel title="Mapa do dinheiro" subtitle="Receita, contas e sobra prevista do mês">
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={cashMap}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
               <XAxis dataKey="name" />
               <YAxis tickFormatter={(value) => `R$ ${value / 1000}k`} />
               <Tooltip formatter={(value) => money(value)} />
-              <Bar dataKey="value" fill="#111827" radius={[8, 8, 0, 0]} />
+              <Bar dataKey="value" radius={[10, 10, 0, 0]}>
+                <Cell fill="#16a34a" />
+                <Cell fill="#f59e0b" />
+                <Cell fill={stats.cashForecast >= 0 ? '#111827' : '#e11d48'} />
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </Panel>
 
-        <Panel title="Gastos por categoria" subtitle={stats.largestCategory ? `Maior categoria: ${stats.largestCategory.name}` : 'Sem gastos no mês'}>
-          <ResponsiveContainer width="100%" height={260}>
-            <PieChart>
-              <Pie data={stats.byCategory} dataKey="value" nameKey="name" innerRadius={58} outerRadius={92} paddingAngle={4}>
-                {stats.byCategory.map((_, index) => (
-                  <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip formatter={(value) => money(value)} />
-            </PieChart>
-          </ResponsiveContainer>
+        <Panel title="Controle de contas" subtitle="Quanto já foi pago no mês">
+          <div className="space-y-5">
+            <div>
+              <div className="mb-2 flex items-center justify-between text-sm">
+                <span className="font-semibold text-slate-600">Progresso pago</span>
+                <span className="font-semibold text-slate-950">{billProgress.toFixed(0)}%</span>
+              </div>
+              <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-slate-950" style={{ width: `${billProgress}%` }} />
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <MiniRow label="Contas pagas" value={money(stats.paidBills)} positive />
+              <MiniRow label="Contas pendentes" value={money(stats.pendingBills)} />
+              <MiniRow label="Caixa atual" value={money(stats.accountBalance)} positive={stats.accountBalance >= 0} />
+              <MiniRow label="Após pendências" value={money(stats.cashPosition)} positive={stats.cashPosition >= 0} />
+            </div>
+          </div>
         </Panel>
       </section>
+
+      <section className="grid gap-4 xl:grid-cols-[1fr_0.9fr_0.9fr]">
+        <Panel title="Gastos por pagamento" subtitle="Crédito e alimentação não reduzem caixa automaticamente">
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={visiblePaymentData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+              <XAxis dataKey="name" />
+              <YAxis tickFormatter={(value) => `R$ ${value / 1000}k`} />
+              <Tooltip formatter={(value) => money(value)} />
+              <Bar dataKey="value" radius={[8, 8, 0, 0]}>
+                {visiblePaymentData.map((_, index) => (
+                  <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </Panel>
+
+        <Panel title="Top categorias" subtitle={stats.largestCategory ? `Maior: ${stats.largestCategory.name}` : 'Sem gastos no mês'}>
+          <div className="space-y-3">
+            {topCategories.map((category, index) => (
+              <DashboardRank key={category.name} index={index + 1} label={category.name} value={category.value} total={totalSpent} />
+            ))}
+            {!topCategories.length && <EmptyState text="Sem gastos por categoria neste mês." />}
+          </div>
+        </Panel>
+
+        <Panel title="Próximas contas" subtitle="Pendências mais relevantes">
+          <div className="space-y-3">
+            {upcomingBills.map((bill) => (
+              <div key={bill.id} className="rounded-3xl border border-slate-100 bg-white p-4">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="truncate font-semibold">{bill.name}</p>
+                  <BillStatusBadge bill={bill} />
+                </div>
+                <div className="flex items-center justify-between text-sm text-slate-500">
+                  <span>Dia {bill.dueDay}</span>
+                  <span className="font-semibold text-slate-950">{money(bill.value)}</span>
+                </div>
+              </div>
+            ))}
+            {!upcomingBills.length && <EmptyState text="Nenhuma conta pendente neste mês." />}
+          </div>
+        </Panel>
+      </section>
+
+      <section className="grid gap-4 md:grid-cols-3">
+        <DashboardInsight title="Afeta caixa" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto" />
+        <DashboardInsight title="Crédito usado" value={money(stats.creditExpenses)} detail="Informativo, sem baixa imediata do saldo" />
+        <DashboardInsight title="Gasto total" value={money(totalSpent)} detail="Leitura do comportamento do mês" />
+      </section>
     </div>
+  );
+}
+
+function HeroMini({ label, value }) {
+  return (
+    <div className="rounded-3xl border border-white/10 bg-white/10 p-4 backdrop-blur">
+      <p className="text-sm text-white/60">{label}</p>
+      <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
+    </div>
+  );
+}
+
+function DashboardRank({ index, label, value, total }) {
+  const percent = total > 0 ? Math.min((value / total) * 100, 100) : 0;
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">{index}</span>
+          <span className="truncate text-sm font-semibold text-slate-800">{label}</span>
+        </div>
+        <span className="text-sm font-semibold text-slate-950">{money(value)}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+        <div className="h-full rounded-full bg-slate-950" style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function DashboardInsight({ title, value, detail }) {
+  return (
+    <article className="rounded-[28px] border border-white bg-white/80 p-5 shadow-[0_18px_60px_rgba(15,23,42,0.05)]">
+      <p className="text-sm font-medium text-slate-500">{title}</p>
+      <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{value}</p>
+      <p className="mt-1 text-sm text-slate-500">{detail}</p>
+    </article>
   );
 }
 
