@@ -42,6 +42,7 @@ import { isSupabaseConfigured, supabase } from './lib/supabaseClient';
 
 const STORAGE_KEY = 'finance-control:v1';
 const CLOUD_SAVE_DELAY = 800;
+const CLOUD_OPERATION_TIMEOUT = 15000;
 
 const DEFAULT_CATEGORIES = [
   'Mercado',
@@ -63,7 +64,7 @@ const PAYMENT_METHODS = ['Crédito', 'Débito', 'Pix', 'Dinheiro', 'Boleto', 'Al
 const CASH_PAYMENT_METHODS = ['Crédito', 'Débito', 'Pix', 'Dinheiro', 'Boleto'];
 const TYPES = ['Receita', 'Conta', 'Despesa', 'Dívida', 'Investimento'];
 const STATUSES = ['Pago', 'Pendente', 'Planejado'];
-const CHART_COLORS = ['#111827', '#64748b', '#0f766e', '#2563eb', '#d97706', '#be123c', '#7c3aed'];
+const CHART_COLORS = ['#0A84FF', '#30D158', '#FF9F0A', '#BF5AF2', '#64D2FF', '#FF375F', '#5E5CE6'];
 
 const now = new Date();
 const TODAY = toDateInput(now);
@@ -119,6 +120,24 @@ function parseMoney(value) {
 
 function uid() {
   return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function withTimeout(promise, timeoutMs = CLOUD_OPERATION_TIMEOUT, label = 'Operação na nuvem') {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error(`${label} demorou mais de ${Math.round(timeoutMs / 1000)}s.`);
+      error.name = 'TimeoutError';
+      reject(error);
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+function cloudErrorMessage(error) {
+  if (error?.name === 'TimeoutError') return error.message;
+  return error?.message || 'erro desconhecido';
 }
 
 function defaultAccount() {
@@ -587,6 +606,20 @@ function mergeUnique(existing, incoming, signatureFn) {
   return { next, added, ignored };
 }
 
+function mergeSnapshotsPreservingExisting(existing, incoming) {
+  const entriesMerge = mergeUnique(existing.entries || [], incoming.entries || [], (entry) => entry.id || `${entry.month}|${entry.date}|${entry.description}|${entry.value}|${entry.paymentMethod}`);
+  const billsMerge = mergeUnique(existing.fixedBills || [], incoming.fixedBills || [], (bill) => bill.id || `${bill.startMonth}|${bill.name}|${bill.value}|${bill.dueDay}`);
+
+  return {
+    entries: entriesMerge.next,
+    fixedBills: billsMerge.next,
+    account: existing.account || incoming.account || defaultAccount(),
+    planning: { ...(incoming.planning || {}), ...(existing.planning || {}) },
+    categories: Array.from(new Set([...(existing.categories || []), ...(incoming.categories || [])])),
+    monthlyRevenue: { ...(incoming.monthlyRevenue || {}), ...(existing.monthlyRevenue || {}) },
+  };
+}
+
 function normalizeImportPayload(parsed) {
   const entries = normalizeEntries(parsed.entries || parsed.lancamentos || parsed.lançamentos || []);
   const importedBills = normalizeFixedBills(parsed.fixedBills || parsed.contas || []);
@@ -662,6 +695,11 @@ function App() {
   const [authMessage, setAuthMessage] = useState('');
   const [localMigrationSnapshot, setLocalMigrationSnapshot] = useState(null);
   const lastSavedSnapshotRef = useRef('');
+  const cloudLoadRequestRef = useRef(0);
+  const saveInFlightRef = useRef(false);
+  const queuedSaveRef = useRef(null);
+  const deletedEntryIdsRef = useRef(new Set());
+  const deletedBillIdsRef = useRef(new Set());
   const fileInputRef = useRef(null);
 
   const monthStats = useMemo(
@@ -708,6 +746,8 @@ function App() {
 
   useEffect(() => {
     if (!session?.user || !supabase) {
+      cloudLoadRequestRef.current += 1;
+      queuedSaveRef.current = null;
       setCloudLoaded(false);
       setSaveStatus('local');
       return;
@@ -740,6 +780,7 @@ function App() {
   }, [account, categories, cloudLoaded, entries, fixedBills, monthlyRevenue, planning, session?.user?.id]);
 
   async function loadCloudData(userId) {
+    const requestId = ++cloudLoadRequestRef.current;
     setCloudLoading(true);
     setCloudLoaded(false);
     setSaveStatus('loading');
@@ -747,15 +788,21 @@ function App() {
     setLocalMigrationSnapshot((current) => current || loadData());
 
     try {
-      const [settingsResult, fixedBillsResult, occurrencesResult, entriesResult, planningResult, categoriesResult, monthlyRevenueResult] = await Promise.all([
-        supabase.from('financial_settings').select('*').eq('user_id', userId).maybeSingle(),
-        supabase.from('fixed_bills').select('*').eq('user_id', userId).order('due_day'),
-        supabase.from('fixed_bill_occurrences').select('*').eq('user_id', userId),
-        supabase.from('quick_expenses').select('*').eq('user_id', userId).order('entry_date', { ascending: false }),
-        supabase.from('monthly_planning').select('*').eq('user_id', userId),
-        supabase.from('categories').select('*').eq('user_id', userId).order('name'),
-        supabase.from('monthly_revenue').select('*').eq('user_id', userId),
-      ]);
+      const [settingsResult, fixedBillsResult, occurrencesResult, entriesResult, planningResult, categoriesResult, monthlyRevenueResult] = await withTimeout(
+        Promise.all([
+          supabase.from('financial_settings').select('*').eq('user_id', userId).maybeSingle(),
+          supabase.from('fixed_bills').select('*').eq('user_id', userId).order('due_day'),
+          supabase.from('fixed_bill_occurrences').select('*').eq('user_id', userId),
+          supabase.from('quick_expenses').select('*').eq('user_id', userId).order('entry_date', { ascending: false }),
+          supabase.from('monthly_planning').select('*').eq('user_id', userId),
+          supabase.from('categories').select('*').eq('user_id', userId).order('name'),
+          supabase.from('monthly_revenue').select('*').eq('user_id', userId),
+        ]),
+        CLOUD_OPERATION_TIMEOUT,
+        'Carregar dados da nuvem',
+      );
+
+      if (requestId !== cloudLoadRequestRef.current) return;
 
       const error =
         settingsResult.error ||
@@ -804,112 +851,198 @@ function App() {
 
       setCloudLoaded(true);
     } catch (error) {
+      if (requestId !== cloudLoadRequestRef.current) return;
       setSaveStatus('error');
-      setSyncMessage(`Não foi possível carregar do Supabase: ${error.message}`);
+      setSyncMessage(`Não foi possível carregar do Supabase: ${cloudErrorMessage(error)} Backup local preservado; tente salvar novamente quando a conexão voltar.`);
       setCloudLoaded(false);
     } finally {
-      setCloudLoading(false);
+      if (requestId === cloudLoadRequestRef.current) {
+        setCloudLoading(false);
+      }
     }
   }
 
   async function saveCloudData(userId, snapshot, serializedSnapshot = JSON.stringify(snapshot)) {
-    if (!cloudLoaded && serializedSnapshot !== lastSavedSnapshotRef.current) return;
+    if (!cloudLoaded) {
+      setSaveStatus('error');
+      setSyncMessage('A nuvem ainda não foi carregada nesta sessão. Backup local preservado; carregue a nuvem antes de sincronizar para não sobrescrever histórico remoto.');
+      return false;
+    }
+
+    if (saveInFlightRef.current) {
+      queuedSaveRef.current = { userId, snapshot, serializedSnapshot };
+      setSaveStatus('saving');
+      setSyncMessage('Salvamento em fila. Backup local já atualizado neste dispositivo.');
+      return false;
+    }
+
+    saveInFlightRef.current = true;
 
     try {
       setSaveStatus('saving');
-      setSyncMessage('Salvando...');
+      setSyncMessage('Salvando na nuvem... Backup local já atualizado.');
+      const deletedEntryIds = Array.from(deletedEntryIdsRef.current);
+      const deletedBillIds = Array.from(deletedBillIdsRef.current);
 
-      const settingsResult = await supabase.from('financial_settings').upsert(settingsFromAccount(snapshot.account, userId), { onConflict: 'user_id' });
+      const settingsResult = await withTimeout(
+        supabase.from('financial_settings').upsert(settingsFromAccount(snapshot.account, userId), { onConflict: 'user_id' }),
+        CLOUD_OPERATION_TIMEOUT,
+        'Salvar configurações',
+      );
       if (settingsResult.error) throw settingsResult.error;
 
       await syncCategories(snapshot.categories, userId);
-      await syncRowsById('quick_expenses', entryRows(snapshot.entries, userId), userId);
+      await syncRowsById('quick_expenses', entryRows(snapshot.entries, userId), userId, deletedEntryIds);
       await syncMonthlyRows('monthly_planning', planningRows(snapshot.planning, userId), userId);
       await syncMonthlyRows('monthly_revenue', monthlyRevenueRows(snapshot.monthlyRevenue, userId), userId);
-      await syncFixedBills(snapshot.fixedBills, userId);
+      await syncFixedBills(snapshot.fixedBills, userId, deletedBillIds);
 
       lastSavedSnapshotRef.current = serializedSnapshot;
+      deletedEntryIds.forEach((id) => deletedEntryIdsRef.current.delete(id));
+      deletedBillIds.forEach((id) => deletedBillIdsRef.current.delete(id));
+      setCloudLoaded(true);
       setSaveStatus('saved');
-      setSyncMessage('Salvo na nuvem.');
+      setSyncMessage('Salvo na nuvem. Backup local atualizado.');
+      return true;
     } catch (error) {
       setSaveStatus('error');
-      setSyncMessage(`Erro ao salvar: ${error.message}`);
+      setSyncMessage(`Erro ao salvar: ${cloudErrorMessage(error)} Backup local preservado; tente novamente.`);
+      return false;
+    } finally {
+      saveInFlightRef.current = false;
+
+      const queuedSave = queuedSaveRef.current;
+      queuedSaveRef.current = null;
+      if (queuedSave && queuedSave.serializedSnapshot !== lastSavedSnapshotRef.current) {
+        window.setTimeout(() => {
+          saveCloudData(queuedSave.userId, queuedSave.snapshot, queuedSave.serializedSnapshot);
+        }, 0);
+      }
     }
   }
 
   function saveCurrentStateToCloud() {
-    if (!session?.user || !supabase || !cloudLoaded) {
-      setSaveStatus(session?.user ? 'loading' : 'local');
-      setSyncMessage(session?.user ? 'Aguarde o carregamento da nuvem terminar antes de salvar.' : 'Modo local: faça login para salvar online.');
+    if (!session?.user || !supabase) {
+      setSaveStatus('local');
+      setSyncMessage('Modo local: faça login para salvar online.');
       return;
     }
 
     const snapshot = localSnapshotFromState({ entries, fixedBills, account, planning, categories, monthlyRevenue });
     const serialized = JSON.stringify(snapshot);
-    saveCloudData(session.user.id, snapshot, serialized);
-  }
 
-  async function syncRowsById(table, rows, userId) {
-    if (rows.length) {
-      const upsertResult = await supabase.from(table).upsert(rows, { onConflict: 'id' });
-      if (upsertResult.error) throw upsertResult.error;
-      const ids = rows.map((row) => row.id);
-      const deleteResult = await supabase.from(table).delete().eq('user_id', userId).not('id', 'in', `(${ids.join(',')})`);
-      if (deleteResult.error) throw deleteResult.error;
+    if (!cloudLoaded) {
+      if (saveStatus === 'loading') {
+        setSyncMessage('A nuvem ainda está carregando. Se a conexão travar, o app libera nova tentativa automaticamente após o tempo limite.');
+        return;
+      }
+
+      setSaveStatus('loading');
+      setSyncMessage('Recarregando a nuvem antes de salvar para preservar o histórico remoto.');
+      loadCloudData(session.user.id);
       return;
     }
 
-    const deleteResult = await supabase.from(table).delete().eq('user_id', userId);
-    if (deleteResult.error) throw deleteResult.error;
+    saveCloudData(session.user.id, snapshot, serialized);
+  }
+
+  async function syncRowsById(table, rows, userId, deletedIds = []) {
+    if (rows.length) {
+      const upsertResult = await withTimeout(supabase.from(table).upsert(rows, { onConflict: 'id' }), CLOUD_OPERATION_TIMEOUT, `Salvar ${table}`);
+      if (upsertResult.error) throw upsertResult.error;
+    }
+
+    if (deletedIds.length) {
+      const deleteResult = await withTimeout(supabase.from(table).delete().eq('user_id', userId).in('id', deletedIds), CLOUD_OPERATION_TIMEOUT, `Remover ${table}`);
+      if (deleteResult.error) throw deleteResult.error;
+    }
   }
 
   async function syncMonthlyRows(table, rows, userId) {
     if (!rows.length) return;
-    const upsertResult = await supabase.from(table).upsert(rows, { onConflict: 'user_id,year,month' });
+    const upsertResult = await withTimeout(
+      supabase.from(table).upsert(rows, { onConflict: 'user_id,year,month' }),
+      CLOUD_OPERATION_TIMEOUT,
+      `Salvar ${table}`,
+    );
     if (upsertResult.error) throw upsertResult.error;
   }
 
   async function syncCategories(rows, userId) {
     const payload = categoryRows(rows, userId);
     if (!payload.length) return;
-    const upsertResult = await supabase.from('categories').upsert(payload, { onConflict: 'user_id,name' });
+    const upsertResult = await withTimeout(
+      supabase.from('categories').upsert(payload, { onConflict: 'user_id,name' }),
+      CLOUD_OPERATION_TIMEOUT,
+      'Salvar categorias',
+    );
     if (upsertResult.error) throw upsertResult.error;
   }
 
-  async function syncFixedBills(rows, userId) {
+  async function syncFixedBills(rows, userId, deletedIds = []) {
     const bills = fixedBillRows(rows, userId);
     if (bills.length) {
-      const billsUpsert = await supabase.from('fixed_bills').upsert(bills, { onConflict: 'id' });
+      const billsUpsert = await withTimeout(supabase.from('fixed_bills').upsert(bills, { onConflict: 'id' }), CLOUD_OPERATION_TIMEOUT, 'Salvar contas fixas');
       if (billsUpsert.error) throw billsUpsert.error;
-      const ids = bills.map((bill) => bill.id);
-      const billsDelete = await supabase.from('fixed_bills').delete().eq('user_id', userId).not('id', 'in', `(${ids.join(',')})`);
-      if (billsDelete.error) throw billsDelete.error;
-    } else {
-      const billsDelete = await supabase.from('fixed_bills').delete().eq('user_id', userId);
+    }
+
+    if (deletedIds.length) {
+      const occurrencesDelete = await withTimeout(
+        supabase.from('fixed_bill_occurrences').delete().eq('user_id', userId).in('fixed_bill_id', deletedIds),
+        CLOUD_OPERATION_TIMEOUT,
+        'Remover ocorrências de contas excluídas',
+      );
+      if (occurrencesDelete.error) throw occurrencesDelete.error;
+
+      const billsDelete = await withTimeout(supabase.from('fixed_bills').delete().eq('user_id', userId).in('id', deletedIds), CLOUD_OPERATION_TIMEOUT, 'Remover contas excluídas');
       if (billsDelete.error) throw billsDelete.error;
     }
 
     const occurrences = occurrenceRows(rows, userId);
     if (occurrences.length) {
-      const occurrencesUpsert = await supabase
-        .from('fixed_bill_occurrences')
-        .upsert(occurrences, { onConflict: 'user_id,fixed_bill_id,year,month' });
+      const occurrencesUpsert = await withTimeout(
+        supabase.from('fixed_bill_occurrences').upsert(occurrences, { onConflict: 'user_id,fixed_bill_id,year,month' }),
+        CLOUD_OPERATION_TIMEOUT,
+        'Salvar ocorrências de contas',
+      );
       if (occurrencesUpsert.error) throw occurrencesUpsert.error;
     }
   }
 
   async function migrateLocalDataToCloud() {
     if (!session?.user || !supabase) return;
+    if (!cloudLoaded) {
+      setSaveStatus('loading');
+      setSyncMessage('Carregue a nuvem antes de migrar dados locais. Isso evita sobrescrever histórico remoto.');
+      loadCloudData(session.user.id);
+      return;
+    }
+
     setCloudLoading(true);
-    const snapshot = localMigrationSnapshot || loadData();
-    await saveCloudData(session.user.id, snapshot);
-    await loadCloudData(session.user.id);
-    setSyncMessage('Migração concluída. O backup local foi mantido neste dispositivo.');
-    setCloudLoading(false);
+    try {
+      const localSnapshot = localMigrationSnapshot || loadData();
+      const cloudSnapshot = localSnapshotFromState({ entries, fixedBills, account, planning, categories, monthlyRevenue });
+      const snapshot = mergeSnapshotsPreservingExisting(cloudSnapshot, localSnapshot);
+      setEntries(snapshot.entries);
+      setFixedBills(snapshot.fixedBills);
+      setAccount(snapshot.account);
+      setPlanning(snapshot.planning);
+      setCategories(snapshot.categories);
+      setMonthlyRevenue(snapshot.monthlyRevenue);
+
+      const saved = await saveCloudData(session.user.id, snapshot, JSON.stringify(snapshot));
+      if (saved) {
+        setSyncMessage('Migração concluída sem sobrescrever dados existentes na nuvem. O backup local foi mantido neste dispositivo.');
+      }
+    } finally {
+      setCloudLoading(false);
+    }
   }
 
   async function signOut() {
     if (!supabase) return;
+    cloudLoadRequestRef.current += 1;
+    queuedSaveRef.current = null;
     await supabase.auth.signOut();
     setSession(null);
     setCloudLoaded(false);
@@ -1002,6 +1135,7 @@ function App() {
   }
 
   function deleteExpense(id) {
+    deletedEntryIdsRef.current.add(id);
     setEntries((current) => current.filter((entry) => entry.id !== id));
     if (editingExpenseId === id) {
       setEditingExpenseId(null);
@@ -1086,6 +1220,7 @@ function App() {
   }
 
   function removeFixedBill(id) {
+    deletedBillIdsRef.current.add(id);
     setFixedBills((current) => current.filter((bill) => bill.id !== id));
   }
 
@@ -1145,14 +1280,14 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#f5f5f7] text-slate-950">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 border-r border-white/80 bg-white/80 px-5 py-6 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur-xl lg:block">
+    <div className="min-h-screen bg-[linear-gradient(135deg,#f8fbff_0%,#edf7ff_26%,#faf7ff_52%,#fff8ec_76%,#f3fffb_100%)] text-slate-950">
+      <aside className="liquid-panel fixed inset-y-0 left-0 z-20 hidden w-72 rounded-none border-y-0 border-l-0 px-5 py-6 lg:block">
         <Brand selectedMonth={selectedMonth} setSelectedMonth={setSelectedMonth} session={session} />
         <Navigation activeView={activeView} setActiveView={setActiveView} />
       </aside>
 
       <main className="lg:pl-72">
-        <header className="sticky top-0 z-10 border-b border-white/70 bg-[#f5f5f7]/85 px-4 py-3 backdrop-blur-xl md:px-8 lg:hidden">
+        <header className="liquid-panel sticky top-0 z-10 rounded-none border-x-0 border-t-0 px-4 py-3 md:px-8 lg:hidden">
           <div className="flex items-center justify-between gap-3">
             <BrandCompact />
             <MonthSelector selectedMonth={selectedMonth} setSelectedMonth={setSelectedMonth} />
@@ -1257,7 +1392,7 @@ function Brand({ selectedMonth, setSelectedMonth, session }) {
   return (
     <div className="mb-8">
       <div className="mb-6 flex items-center gap-3">
-        <div className="grid h-11 w-11 place-items-center rounded-2xl bg-slate-950 text-white shadow-lg shadow-slate-900/10">
+        <div className="grid h-11 w-11 place-items-center rounded-2xl border border-white/30 bg-[linear-gradient(135deg,#111827,#0A84FF_55%,#30D158)] text-white shadow-lg shadow-sky-900/15">
           <CircleDollarSign size={23} />
         </div>
         <div>
@@ -1273,7 +1408,7 @@ function Brand({ selectedMonth, setSelectedMonth, session }) {
 function BrandCompact() {
   return (
     <div className="flex items-center gap-2">
-      <div className="grid h-10 w-10 place-items-center rounded-2xl bg-slate-950 text-white">
+      <div className="grid h-10 w-10 place-items-center rounded-2xl border border-white/30 bg-[linear-gradient(135deg,#111827,#0A84FF_55%,#30D158)] text-white shadow-lg shadow-sky-900/15">
         <CircleDollarSign size={20} />
       </div>
       <div>
@@ -1286,8 +1421,8 @@ function BrandCompact() {
 
 function MonthSelector({ selectedMonth, setSelectedMonth }) {
   return (
-    <label className="flex min-h-11 items-center gap-2 rounded-2xl border border-white bg-white/80 px-3 py-2 text-sm font-medium text-slate-700 shadow-sm">
-      <CalendarDays size={17} className="text-slate-400" />
+    <label className="liquid-item flex min-h-11 items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium text-slate-700">
+      <CalendarDays size={17} className="text-sky-500" />
       <input type="month" value={selectedMonth} onChange={(event) => setSelectedMonth(event.target.value)} className="max-w-32 bg-transparent outline-none" />
     </label>
   );
@@ -1313,7 +1448,9 @@ function Navigation({ activeView, setActiveView, compact = false }) {
             key={item.id}
             onClick={() => setActiveView(item.id)}
             className={`flex min-h-11 items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
-              active ? 'bg-slate-950 text-white shadow-lg shadow-slate-900/10' : 'text-slate-500 hover:bg-white hover:text-slate-950'
+              active
+                ? 'border border-white/20 bg-[linear-gradient(135deg,rgba(15,23,42,0.96),rgba(14,116,144,0.86))] text-white shadow-lg shadow-sky-900/15'
+                : 'text-slate-500 hover:bg-white/55 hover:text-slate-950'
             } ${compact ? 'shrink-0' : 'w-full'}`}
           >
             <Icon size={18} />
@@ -1358,16 +1495,16 @@ function PageTitle({ activeView, selectedMonth, session, saveStatus, syncMessage
 
 function SaveStatusBadge({ session, saveStatus }) {
   const config = !session?.user
-    ? { label: 'Modo local', className: 'bg-slate-100 text-slate-700' }
+    ? { label: 'Modo local', className: 'bg-white/55 text-slate-700' }
     : {
-        loading: { label: 'Carregando nuvem', className: 'bg-blue-50 text-blue-700' },
-        saving: { label: 'Salvando...', className: 'bg-amber-50 text-amber-700' },
-        saved: { label: 'Salvo na nuvem', className: 'bg-emerald-50 text-emerald-700' },
-        error: { label: 'Erro ao salvar', className: 'bg-rose-50 text-rose-700' },
-        local: { label: 'Modo local', className: 'bg-slate-100 text-slate-700' },
-      }[saveStatus] || { label: 'Online com Supabase', className: 'bg-emerald-50 text-emerald-700' };
+        loading: { label: 'Carregando nuvem', className: 'bg-sky-100/70 text-sky-700' },
+        saving: { label: 'Salvando...', className: 'bg-amber-100/70 text-amber-700' },
+        saved: { label: 'Salvo na nuvem', className: 'bg-emerald-100/70 text-emerald-700' },
+        error: { label: 'Erro ao salvar', className: 'bg-rose-100/70 text-rose-700' },
+        local: { label: 'Modo local', className: 'bg-white/55 text-slate-700' },
+      }[saveStatus] || { label: 'Online com Supabase', className: 'bg-emerald-100/70 text-emerald-700' };
 
-  return <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${config.className}`}>{config.label}</span>;
+  return <span className={`inline-flex rounded-full border border-white/60 px-3 py-1 text-xs font-semibold shadow-sm backdrop-blur-xl ${config.className}`}>{config.label}</span>;
 }
 
 function Dashboard({ stats, selectedMonth }) {
@@ -1393,10 +1530,10 @@ function Dashboard({ stats, selectedMonth }) {
 
   return (
     <div className="space-y-6">
-      <section className="overflow-hidden rounded-[36px] bg-slate-950 p-6 text-white shadow-[0_30px_90px_rgba(15,23,42,0.20)] md:p-8">
+      <section className="liquid-dark rounded-[36px] p-6 text-white md:p-8">
         <div className="grid gap-8 xl:grid-cols-[1.15fr_0.85fr] xl:items-end">
           <div>
-            <div className="mb-8 inline-flex rounded-full bg-white/10 px-3 py-1 text-sm font-semibold text-white/80">
+            <div className="mb-8 inline-flex rounded-full border border-white/20 bg-white/15 px-3 py-1 text-sm font-semibold text-white/85 shadow-sm backdrop-blur-xl">
               {monthLabel(selectedMonth)}
             </div>
             <p className={`text-sm font-semibold ${forecastTone}`}>{forecastHealth}</p>
@@ -1432,9 +1569,9 @@ function Dashboard({ stats, selectedMonth }) {
               <YAxis tickFormatter={(value) => `R$ ${value / 1000}k`} />
               <Tooltip formatter={(value) => money(value)} />
               <Bar dataKey="value" radius={[10, 10, 0, 0]}>
-                <Cell fill="#16a34a" />
-                <Cell fill="#f59e0b" />
-                <Cell fill={stats.cashForecast >= 0 ? '#111827' : '#e11d48'} />
+                <Cell fill="#30D158" />
+                <Cell fill="#FF9F0A" />
+                <Cell fill={stats.cashForecast >= 0 ? '#0A84FF' : '#FF375F'} />
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -1447,8 +1584,8 @@ function Dashboard({ stats, selectedMonth }) {
                 <span className="font-semibold text-slate-600">Progresso pago</span>
                 <span className="font-semibold text-slate-950">{billProgress.toFixed(0)}%</span>
               </div>
-              <div className="h-3 overflow-hidden rounded-full bg-slate-100">
-                <div className="h-full rounded-full bg-slate-950" style={{ width: `${billProgress}%` }} />
+              <div className="h-3 overflow-hidden rounded-full bg-white/55 shadow-inner">
+                <div className="h-full rounded-full bg-[linear-gradient(90deg,#0A84FF,#30D158)]" style={{ width: `${billProgress}%` }} />
               </div>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -1490,7 +1627,7 @@ function Dashboard({ stats, selectedMonth }) {
         <Panel title="Próximas contas" subtitle="Pendências mais relevantes">
           <div className="space-y-3">
             {upcomingBills.map((bill) => (
-              <div key={bill.id} className="rounded-3xl border border-slate-100 bg-white p-4">
+              <div key={bill.id} className="liquid-item rounded-3xl p-4">
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <p className="truncate font-semibold">{bill.name}</p>
                   <BillStatusBadge bill={bill} />
@@ -1517,7 +1654,7 @@ function Dashboard({ stats, selectedMonth }) {
 
 function HeroMini({ label, value }) {
   return (
-    <div className="rounded-3xl border border-white/10 bg-white/10 p-4 backdrop-blur">
+    <div className="rounded-3xl border border-white/20 bg-white/15 p-4 shadow-sm backdrop-blur-xl">
       <p className="text-sm text-white/60">{label}</p>
       <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
     </div>
@@ -1531,13 +1668,13 @@ function DashboardRank({ index, label, value, total }) {
     <div>
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">{index}</span>
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/60 bg-white/65 text-xs font-semibold text-slate-600 shadow-sm backdrop-blur-xl">{index}</span>
           <span className="truncate text-sm font-semibold text-slate-800">{label}</span>
         </div>
         <span className="text-sm font-semibold text-slate-950">{money(value)}</span>
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-        <div className="h-full rounded-full bg-slate-950" style={{ width: `${percent}%` }} />
+      <div className="h-2 overflow-hidden rounded-full bg-white/60 shadow-inner">
+        <div className="h-full rounded-full bg-[linear-gradient(90deg,#0A84FF,#30D158)]" style={{ width: `${percent}%` }} />
       </div>
     </div>
   );
@@ -1545,7 +1682,7 @@ function DashboardRank({ index, label, value, total }) {
 
 function DashboardInsight({ title, value, detail }) {
   return (
-    <article className="rounded-[28px] border border-white bg-white/80 p-5 shadow-[0_18px_60px_rgba(15,23,42,0.05)]">
+    <article className="liquid-panel rounded-[28px] p-5">
       <p className="text-sm font-medium text-slate-500">{title}</p>
       <p className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">{value}</p>
       <p className="mt-1 text-sm text-slate-500">{detail}</p>
@@ -1652,7 +1789,7 @@ function Expenses({
             Opções avançadas <ChevronDown className={showAdvanced ? 'rotate-180 transition' : 'transition'} size={18} />
           </button>
           {showAdvanced && (
-            <div className="grid gap-4 rounded-3xl bg-slate-50 p-4">
+            <div className="grid gap-4 rounded-3xl border border-white/60 bg-white/35 p-4 backdrop-blur-xl">
               <Select label="Status" value={quickExpense.status} options={STATUSES} onChange={(value) => setQuickExpense({ ...quickExpense, status: value })} />
               <Select label="Tipo" value={quickExpense.type} options={TYPES} onChange={(value) => setQuickExpense({ ...quickExpense, type: value })} />
               <Field label="Observação">
@@ -1777,19 +1914,19 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, edit
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="truncate font-semibold">{bill.name}</p>
                     <BillStatusBadge bill={bill} />
-                    {bill.recurring && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">Recorrente</span>}
+                    {bill.recurring && <span className="rounded-full border border-white/50 bg-sky-100/70 px-2.5 py-1 text-xs font-semibold text-sky-700 shadow-sm backdrop-blur-xl">Recorrente</span>}
                   </div>
                   <p className="text-sm text-slate-500">Dia {bill.dueDay} - {bill.category}</p>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <p className="mr-1 font-semibold">{money(bill.value)}</p>
-                  <button onClick={() => setBillPaid(bill.id, selectedMonth, true)} className="btn-mini bg-emerald-50 text-emerald-700">
+                  <button onClick={() => setBillPaid(bill.id, selectedMonth, true)} className="btn-mini bg-emerald-100/70 text-emerald-700">
                     Paga
                   </button>
-                  <button onClick={() => setBillPaid(bill.id, selectedMonth, false)} className="btn-mini bg-amber-50 text-amber-700">
+                  <button onClick={() => setBillPaid(bill.id, selectedMonth, false)} className="btn-mini bg-amber-100/70 text-amber-700">
                     Pendente
                   </button>
-                  <button onClick={() => editFixedBill(bill)} className="btn-mini bg-slate-100 text-slate-700">
+                  <button onClick={() => editFixedBill(bill)} className="btn-mini bg-white/60 text-slate-700">
                     Editar
                   </button>
                   <IconButton label="Excluir" onClick={() => removeFixedBill(bill.id)} danger>
@@ -1870,7 +2007,7 @@ function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage
           <div className="mb-4">
             <SaveStatusBadge session={session} saveStatus={saveStatus} />
           </div>
-          <p className="rounded-3xl bg-slate-50 p-4 text-sm text-slate-600">{syncMessage || 'Aguardando alterações.'}</p>
+          <p className="rounded-3xl border border-white/60 bg-white/35 p-4 text-sm text-slate-600 backdrop-blur-xl">{syncMessage || 'Aguardando alterações.'}</p>
         </Panel>
       </section>
     );
@@ -1886,7 +2023,7 @@ function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage
           <Field label="Senha">
             <input type="password" minLength="6" value={password} onChange={(event) => setPassword(event.target.value)} className="input" required />
           </Field>
-          {authMessage && <div className="rounded-3xl bg-amber-50 p-3 text-sm text-amber-800">{authMessage}</div>}
+          {authMessage && <div className="rounded-3xl border border-amber-100/80 bg-amber-50/70 p-3 text-sm text-amber-800 backdrop-blur-xl">{authMessage}</div>}
           <button disabled={submitting} className="btn-primary">
             <User size={18} /> {submitting ? 'Aguarde...' : mode === 'login' ? 'Entrar' : 'Criar conta'}
           </button>
@@ -1926,19 +2063,19 @@ function SettingsPanel({ session, saveStatus, syncMessage, importMessage, export
             <Upload size={18} /> Importar JSON
           </button>
           <input ref={fileInputRef} type="file" accept="application/json" onChange={importData} className="hidden" />
-          {importMessage && <p className="rounded-3xl bg-slate-50 p-3 text-sm text-slate-600">{importMessage}</p>}
+          {importMessage && <p className="rounded-3xl border border-white/60 bg-white/35 p-3 text-sm text-slate-600 backdrop-blur-xl">{importMessage}</p>}
         </div>
       </Panel>
 
       <Panel title="Armazenamento" subtitle="Local e nuvem">
         <div className="space-y-3">
           <MiniRow label="Modo atual" value={session?.user ? 'Supabase + localStorage' : 'localStorage'} positive={Boolean(session?.user)} />
-          <div className="rounded-3xl border border-slate-100 bg-white px-4 py-3">
+          <div className="liquid-item rounded-3xl px-4 py-3">
             <span className="mb-2 block text-sm font-medium text-slate-500">Status</span>
             <SaveStatusBadge session={session} saveStatus={saveStatus} />
           </div>
           <MiniRow label="Usuário" value={session?.user?.email || 'Sem login'} />
-          <p className="rounded-3xl bg-slate-50 p-3 text-sm text-slate-600">{syncMessage || 'Sem sincronização em andamento.'}</p>
+          <p className="rounded-3xl border border-white/60 bg-white/35 p-3 text-sm text-slate-600 backdrop-blur-xl">{syncMessage || 'Sem sincronização em andamento.'}</p>
         </div>
       </Panel>
 
@@ -1957,22 +2094,22 @@ function SettingsPanel({ session, saveStatus, syncMessage, importMessage, export
 
 function SummaryCard({ title, value, detail, icon: Icon, tone = 'slate', compact = false }) {
   const toneClass = {
-    green: 'bg-emerald-50 text-emerald-700',
-    red: 'bg-rose-50 text-rose-700',
-    amber: 'bg-amber-50 text-amber-700',
-    blue: 'bg-blue-50 text-blue-700',
-    slate: 'bg-slate-100 text-slate-700',
+    green: 'bg-emerald-100/70 text-emerald-700',
+    red: 'bg-rose-100/70 text-rose-700',
+    amber: 'bg-amber-100/70 text-amber-700',
+    blue: 'bg-sky-100/70 text-sky-700',
+    slate: 'bg-white/65 text-slate-700',
   }[tone];
 
   return (
-    <article className={`rounded-[28px] border border-white bg-white/90 shadow-[0_20px_70px_rgba(15,23,42,0.06)] ${compact ? 'p-4' : 'p-5'}`}>
+    <article className={`liquid-panel rounded-[28px] ${compact ? 'p-4' : 'p-5'}`}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p className="text-sm font-medium text-slate-500">{title}</p>
           <p className={`${compact ? 'text-xl' : 'text-2xl'} mt-2 truncate font-semibold tracking-tight text-slate-950`}>{value}</p>
           {detail && <p className="mt-1 text-sm text-slate-500">{detail}</p>}
         </div>
-        <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ${toneClass}`}>
+        <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-white/55 shadow-sm backdrop-blur-xl ${toneClass}`}>
           <Icon size={21} />
         </div>
       </div>
@@ -1982,7 +2119,7 @@ function SummaryCard({ title, value, detail, icon: Icon, tone = 'slate', compact
 
 function Panel({ title, subtitle, children }) {
   return (
-    <article className="rounded-[30px] border border-white bg-white/90 p-5 shadow-[0_24px_80px_rgba(15,23,42,0.06)] md:p-6">
+    <article className="liquid-panel rounded-[30px] p-5 md:p-6">
       <div className="mb-5">
         <h2 className="text-lg font-semibold tracking-tight text-slate-950">{title}</h2>
         {subtitle && <p className="mt-1 text-sm text-slate-500">{subtitle}</p>}
@@ -1993,33 +2130,33 @@ function Panel({ title, subtitle, children }) {
 }
 
 function ListItem({ children }) {
-  return <div className="flex flex-col gap-3 rounded-3xl border border-slate-100 bg-white p-4 shadow-sm md:flex-row md:items-center md:justify-between">{children}</div>;
+  return <div className="liquid-item flex flex-col gap-3 rounded-3xl p-4 md:flex-row md:items-center md:justify-between">{children}</div>;
 }
 
 function BillListItem({ bill, children }) {
   const status = statusForDueDate(bill.dueDate, bill.status === 'Pago');
   const className = {
-    green: 'border-emerald-200 bg-emerald-50/80 shadow-emerald-900/5',
-    red: 'border-rose-300 bg-rose-50 shadow-rose-900/10',
-    amber: 'border-amber-300 bg-amber-50 shadow-amber-900/10',
-    slate: 'border-slate-100 bg-white shadow-slate-900/5',
+    green: 'border-emerald-200/70 bg-emerald-50/55 shadow-emerald-900/5',
+    red: 'border-rose-300/70 bg-rose-50/60 shadow-rose-900/10',
+    amber: 'border-amber-300/70 bg-amber-50/60 shadow-amber-900/10',
+    slate: 'border-white/55 bg-white/45 shadow-slate-900/5',
   }[status.tone];
 
-  return <div className={`flex flex-col gap-3 rounded-3xl border p-4 shadow-sm md:flex-row md:items-center md:justify-between ${className}`}>{children}</div>;
+  return <div className={`liquid-item flex flex-col gap-3 rounded-3xl p-4 md:flex-row md:items-center md:justify-between ${className}`}>{children}</div>;
 }
 
 function BillStatusBadge({ bill }) {
   const status = statusForDueDate(bill.dueDate, bill.status === 'Pago');
   const Icon = status.icon;
   const className = {
-    green: 'bg-emerald-600 text-white',
-    red: 'bg-rose-600 text-white',
-    amber: 'bg-amber-500 text-white',
-    slate: 'bg-slate-100 text-slate-700',
+    green: 'bg-emerald-500/90 text-white',
+    red: 'bg-rose-500/90 text-white',
+    amber: 'bg-amber-400/90 text-white',
+    slate: 'bg-white/65 text-slate-700',
   }[status.tone];
 
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold shadow-sm ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border border-white/45 px-3 py-1.5 text-xs font-semibold shadow-sm backdrop-blur-xl ${className}`}>
       <Icon size={14} /> {status.label}
     </span>
   );
@@ -2093,16 +2230,16 @@ function FilterSelect({ value, options, placeholder, onChange }) {
 
 function Toggle({ label, checked, onChange }) {
   return (
-    <label className="flex min-h-11 items-center justify-between gap-3 rounded-2xl border border-slate-100 bg-white px-3 py-2 text-sm font-semibold">
+    <label className="liquid-item flex min-h-11 items-center justify-between gap-3 rounded-2xl px-3 py-2 text-sm font-semibold">
       {label}
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-5 w-5 accent-slate-950" />
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-5 w-5 accent-sky-600" />
     </label>
   );
 }
 
 function MiniRow({ label, value, positive = false }) {
   return (
-    <div className="flex items-center justify-between rounded-3xl border border-slate-100 bg-white px-4 py-3">
+    <div className="liquid-item flex items-center justify-between rounded-3xl px-4 py-3">
       <span className="text-sm font-medium text-slate-500">{label}</span>
       <span className={`font-semibold ${positive ? 'text-emerald-700' : 'text-slate-950'}`}>{value}</span>
     </div>
@@ -2111,14 +2248,14 @@ function MiniRow({ label, value, positive = false }) {
 
 function IconButton({ label, onClick, danger = false, children }) {
   return (
-    <button onClick={onClick} className={`grid h-10 w-10 place-items-center rounded-2xl border border-slate-100 bg-white ${danger ? 'text-rose-700' : 'text-slate-600'}`} title={label}>
+    <button onClick={onClick} className={`liquid-item grid h-10 w-10 place-items-center rounded-2xl ${danger ? 'text-rose-700' : 'text-slate-600'}`} title={label}>
       {children}
     </button>
   );
 }
 
 function EmptyState({ text }) {
-  return <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50/70 p-8 text-center text-sm text-slate-500">{text}</div>;
+  return <div className="rounded-3xl border border-dashed border-white/70 bg-white/35 p-8 text-center text-sm text-slate-500 backdrop-blur-xl">{text}</div>;
 }
 
 export default App;
