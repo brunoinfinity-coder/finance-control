@@ -1,17 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import {
   AlertCircle,
   ArrowDownCircle,
   ArrowUpCircle,
@@ -22,7 +10,6 @@ import {
   CircleDollarSign,
   CreditCard,
   Download,
-  FileJson,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -36,7 +23,6 @@ import {
   User,
   Wallet,
   WalletCards,
-  X,
 } from 'lucide-react';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient';
 
@@ -1504,20 +1490,16 @@ function SaveStatusBadge({ session, saveStatus }) {
         local: { label: 'Modo local', className: 'bg-white/55 text-slate-700' },
       }[saveStatus] || { label: 'Online com Supabase', className: 'bg-emerald-100/70 text-emerald-700' };
 
-  return <span className={`inline-flex rounded-full border border-white/60 px-3 py-1 text-xs font-semibold shadow-sm backdrop-blur-xl ${config.className}`}>{config.label}</span>;
+  return <span className={`inline-flex rounded-full border border-white/60 px-3 py-1 text-xs font-semibold shadow-sm ${config.className}`}>{config.label}</span>;
 }
 
 function Dashboard({ stats, selectedMonth }) {
-  const billChart = [
-    { name: 'Pagas', value: stats.paidBills },
-    { name: 'Pendentes', value: stats.pendingBills },
-  ];
   const cashMap = [
-    { name: 'Receita', value: stats.cashRevenue },
-    { name: 'Contas', value: stats.billsTotal },
-    { name: 'Sobra', value: Math.max(stats.cashForecast, 0) },
+    { name: 'Receita', value: stats.cashRevenue, color: '#30D158' },
+    { name: 'Contas', value: stats.billsTotal, color: '#FF9F0A' },
+    { name: 'Sobra', value: Math.max(stats.cashForecast, 0), color: stats.cashForecast >= 0 ? '#0A84FF' : '#FF375F' },
   ];
-  const visiblePaymentData = stats.byPayment.filter((item) => item.value > 0);
+  const visiblePaymentData = stats.byPayment.filter((item) => item.value > 0).map((item, index) => ({ ...item, color: CHART_COLORS[index % CHART_COLORS.length] }));
   const topCategories = [...stats.byCategory].sort((a, b) => b.value - a.value).slice(0, 5);
   const upcomingBills = [...stats.bills]
     .filter((bill) => bill.status !== 'Pago')
@@ -1533,7 +1515,7 @@ function Dashboard({ stats, selectedMonth }) {
       <section className="liquid-dark rounded-[36px] p-6 text-white md:p-8">
         <div className="grid gap-8 xl:grid-cols-[1.15fr_0.85fr] xl:items-end">
           <div>
-            <div className="mb-8 inline-flex rounded-full border border-white/20 bg-white/15 px-3 py-1 text-sm font-semibold text-white/85 shadow-sm backdrop-blur-xl">
+            <div className="mb-8 inline-flex rounded-full border border-white/20 bg-white/15 px-3 py-1 text-sm font-semibold text-white/85 shadow-sm">
               {monthLabel(selectedMonth)}
             </div>
             <p className={`text-sm font-semibold ${forecastTone}`}>{forecastHealth}</p>
@@ -1562,19 +1544,7 @@ function Dashboard({ stats, selectedMonth }) {
 
       <section className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
         <Panel title="Mapa do dinheiro" subtitle="Receita, contas e sobra prevista do mês">
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={cashMap}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
-              <XAxis dataKey="name" />
-              <YAxis tickFormatter={(value) => `R$ ${value / 1000}k`} />
-              <Tooltip formatter={(value) => money(value)} />
-              <Bar dataKey="value" radius={[10, 10, 0, 0]}>
-                <Cell fill="#30D158" />
-                <Cell fill="#FF9F0A" />
-                <Cell fill={stats.cashForecast >= 0 ? '#0A84FF' : '#FF375F'} />
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <LightweightBarChart data={cashMap} />
         </Panel>
 
         <Panel title="Controle de contas" subtitle="Quanto já foi pago no mês">
@@ -1600,19 +1570,7 @@ function Dashboard({ stats, selectedMonth }) {
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.9fr_0.9fr]">
         <Panel title="Gastos por pagamento" subtitle="Crédito e alimentação não reduzem caixa automaticamente">
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={visiblePaymentData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
-              <XAxis dataKey="name" />
-              <YAxis tickFormatter={(value) => `R$ ${value / 1000}k`} />
-              <Tooltip formatter={(value) => money(value)} />
-              <Bar dataKey="value" radius={[8, 8, 0, 0]}>
-                {visiblePaymentData.map((_, index) => (
-                  <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <LightweightBarChart data={visiblePaymentData} emptyText="Sem gastos por forma de pagamento neste mês." />
         </Panel>
 
         <Panel title="Top categorias" subtitle={stats.largestCategory ? `Maior: ${stats.largestCategory.name}` : 'Sem gastos no mês'}>
@@ -1654,9 +1612,37 @@ function Dashboard({ stats, selectedMonth }) {
 
 function HeroMini({ label, value }) {
   return (
-    <div className="rounded-3xl border border-white/20 bg-white/15 p-4 shadow-sm backdrop-blur-xl">
+    <div className="rounded-3xl border border-white/20 bg-white/15 p-4 shadow-sm">
       <p className="text-sm text-white/60">{label}</p>
       <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
+    </div>
+  );
+}
+
+function LightweightBarChart({ data, emptyText = 'Sem dados para exibir.' }) {
+  const items = data.filter((item) => Number(item.value) > 0);
+  const max = Math.max(...items.map((item) => Number(item.value || 0)), 1);
+
+  if (!items.length) return <EmptyState text={emptyText} />;
+
+  return (
+    <div className="grid min-h-[240px] content-center gap-4 py-2">
+      {items.map((item) => {
+        const value = Number(item.value || 0);
+        const width = Math.max((value / max) * 100, 3);
+
+        return (
+          <div key={item.name} className="grid gap-2">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="truncate font-semibold text-slate-700">{item.name}</span>
+              <span className="shrink-0 font-semibold text-slate-950">{money(value)}</span>
+            </div>
+            <div className="h-3 overflow-hidden rounded-full bg-white/60 shadow-inner">
+              <div className="h-full rounded-full" style={{ width: `${width}%`, backgroundColor: item.color || '#0A84FF' }} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1668,7 +1654,7 @@ function DashboardRank({ index, label, value, total }) {
     <div>
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/60 bg-white/65 text-xs font-semibold text-slate-600 shadow-sm backdrop-blur-xl">{index}</span>
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/60 bg-white/65 text-xs font-semibold text-slate-600 shadow-sm">{index}</span>
           <span className="truncate text-sm font-semibold text-slate-800">{label}</span>
         </div>
         <span className="text-sm font-semibold text-slate-950">{money(value)}</span>
@@ -1789,7 +1775,7 @@ function Expenses({
             Opções avançadas <ChevronDown className={showAdvanced ? 'rotate-180 transition' : 'transition'} size={18} />
           </button>
           {showAdvanced && (
-            <div className="grid gap-4 rounded-3xl border border-white/60 bg-white/35 p-4 backdrop-blur-xl">
+            <div className="grid gap-4 rounded-3xl border border-white/60 bg-white/35 p-4">
               <Select label="Status" value={quickExpense.status} options={STATUSES} onChange={(value) => setQuickExpense({ ...quickExpense, status: value })} />
               <Select label="Tipo" value={quickExpense.type} options={TYPES} onChange={(value) => setQuickExpense({ ...quickExpense, type: value })} />
               <Field label="Observação">
@@ -1914,7 +1900,7 @@ function Bills({ selectedMonth, stats, billForm, setBillForm, addFixedBill, edit
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="truncate font-semibold">{bill.name}</p>
                     <BillStatusBadge bill={bill} />
-                    {bill.recurring && <span className="rounded-full border border-white/50 bg-sky-100/70 px-2.5 py-1 text-xs font-semibold text-sky-700 shadow-sm backdrop-blur-xl">Recorrente</span>}
+                    {bill.recurring && <span className="rounded-full border border-white/50 bg-sky-100/70 px-2.5 py-1 text-xs font-semibold text-sky-700 shadow-sm">Recorrente</span>}
                   </div>
                   <p className="text-sm text-slate-500">Dia {bill.dueDay} - {bill.category}</p>
                 </div>
@@ -2007,7 +1993,7 @@ function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage
           <div className="mb-4">
             <SaveStatusBadge session={session} saveStatus={saveStatus} />
           </div>
-          <p className="rounded-3xl border border-white/60 bg-white/35 p-4 text-sm text-slate-600 backdrop-blur-xl">{syncMessage || 'Aguardando alterações.'}</p>
+          <p className="rounded-3xl border border-white/60 bg-white/35 p-4 text-sm text-slate-600">{syncMessage || 'Aguardando alterações.'}</p>
         </Panel>
       </section>
     );
@@ -2023,7 +2009,7 @@ function AuthPanel({ session, authLoading, cloudLoading, saveStatus, authMessage
           <Field label="Senha">
             <input type="password" minLength="6" value={password} onChange={(event) => setPassword(event.target.value)} className="input" required />
           </Field>
-          {authMessage && <div className="rounded-3xl border border-amber-100/80 bg-amber-50/70 p-3 text-sm text-amber-800 backdrop-blur-xl">{authMessage}</div>}
+          {authMessage && <div className="rounded-3xl border border-amber-100/80 bg-amber-50/70 p-3 text-sm text-amber-800">{authMessage}</div>}
           <button disabled={submitting} className="btn-primary">
             <User size={18} /> {submitting ? 'Aguarde...' : mode === 'login' ? 'Entrar' : 'Criar conta'}
           </button>
@@ -2063,7 +2049,7 @@ function SettingsPanel({ session, saveStatus, syncMessage, importMessage, export
             <Upload size={18} /> Importar JSON
           </button>
           <input ref={fileInputRef} type="file" accept="application/json" onChange={importData} className="hidden" />
-          {importMessage && <p className="rounded-3xl border border-white/60 bg-white/35 p-3 text-sm text-slate-600 backdrop-blur-xl">{importMessage}</p>}
+          {importMessage && <p className="rounded-3xl border border-white/60 bg-white/35 p-3 text-sm text-slate-600">{importMessage}</p>}
         </div>
       </Panel>
 
@@ -2075,7 +2061,7 @@ function SettingsPanel({ session, saveStatus, syncMessage, importMessage, export
             <SaveStatusBadge session={session} saveStatus={saveStatus} />
           </div>
           <MiniRow label="Usuário" value={session?.user?.email || 'Sem login'} />
-          <p className="rounded-3xl border border-white/60 bg-white/35 p-3 text-sm text-slate-600 backdrop-blur-xl">{syncMessage || 'Sem sincronização em andamento.'}</p>
+          <p className="rounded-3xl border border-white/60 bg-white/35 p-3 text-sm text-slate-600">{syncMessage || 'Sem sincronização em andamento.'}</p>
         </div>
       </Panel>
 
@@ -2109,7 +2095,7 @@ function SummaryCard({ title, value, detail, icon: Icon, tone = 'slate', compact
           <p className={`${compact ? 'text-xl' : 'text-2xl'} mt-2 truncate font-semibold tracking-tight text-slate-950`}>{value}</p>
           {detail && <p className="mt-1 text-sm text-slate-500">{detail}</p>}
         </div>
-        <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-white/55 shadow-sm backdrop-blur-xl ${toneClass}`}>
+        <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl border border-white/55 shadow-sm ${toneClass}`}>
           <Icon size={21} />
         </div>
       </div>
@@ -2156,7 +2142,7 @@ function BillStatusBadge({ bill }) {
   }[status.tone];
 
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border border-white/45 px-3 py-1.5 text-xs font-semibold shadow-sm backdrop-blur-xl ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border border-white/45 px-3 py-1.5 text-xs font-semibold shadow-sm ${className}`}>
       <Icon size={14} /> {status.label}
     </span>
   );
@@ -2255,7 +2241,7 @@ function IconButton({ label, onClick, danger = false, children }) {
 }
 
 function EmptyState({ text }) {
-  return <div className="rounded-3xl border border-dashed border-white/70 bg-white/35 p-8 text-center text-sm text-slate-500 backdrop-blur-xl">{text}</div>;
+  return <div className="rounded-3xl border border-dashed border-white/70 bg-white/35 p-8 text-center text-sm text-slate-500">{text}</div>;
 }
 
 export default App;
