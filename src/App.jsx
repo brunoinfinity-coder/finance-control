@@ -46,6 +46,14 @@ const DEFAULT_CATEGORIES = [
   'Outros',
 ];
 
+const CATEGORY_ALIASES = {
+  combustivel: 'Combustível',
+  'combusta vel': 'Combustível',
+  farmacia: 'Farmácia',
+  'farma cia': 'Farmácia',
+  'compra nao planejada': 'Compra não Planejada',
+};
+
 const PAYMENT_METHODS = ['Crédito', 'Débito', 'Pix', 'Dinheiro', 'Boleto', 'Alimentação'];
 const CASH_PAYMENT_METHODS = ['Crédito', 'Débito', 'Pix', 'Dinheiro', 'Boleto'];
 const TYPES = ['Receita', 'Conta', 'Despesa', 'Dívida', 'Investimento'];
@@ -180,6 +188,52 @@ function normalizeStatus(status, paidValue) {
   return raw ? 'Pendente' : 'Pago';
 }
 
+function repairCommonMojibake(value) {
+  return String(value || '')
+    .replace(/\u00c3\u00a1/g, 'á')
+    .replace(/\u00c3\u00a2/g, 'â')
+    .replace(/\u00c3\u00a3/g, 'ã')
+    .replace(/\u00c3\u00a7/g, 'ç')
+    .replace(/\u00c3\u00a9/g, 'é')
+    .replace(/\u00c3\u00aa/g, 'ê')
+    .replace(/\u00c3\u00ad/g, 'í')
+    .replace(/\u00c3\u00b3/g, 'ó')
+    .replace(/\u00c3\u00b4/g, 'ô')
+    .replace(/\u00c3\u00b5/g, 'õ')
+    .replace(/\u00c3\u00ba/g, 'ú');
+}
+
+function cleanCategoryName(category) {
+  return repairCommonMojibake(category).replace(/\s+/g, ' ').trim() || 'Outros';
+}
+
+function categoryKey(category) {
+  return cleanCategoryName(category)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function normalizeCategoryName(category, preferredCategories = DEFAULT_CATEGORIES) {
+  const cleaned = cleanCategoryName(category);
+  const key = categoryKey(cleaned);
+  const alias = CATEGORY_ALIASES[key];
+  if (alias) return alias;
+  return preferredCategories.find((preferred) => categoryKey(preferred) === key) || cleaned;
+}
+
+function normalizeCategories(categories = []) {
+  const byKey = new Map();
+  [...DEFAULT_CATEGORIES, ...(Array.isArray(categories) ? categories : [])].forEach((category) => {
+    const normalized = normalizeCategoryName(category);
+    const key = categoryKey(normalized);
+    if (key && !byKey.has(key)) byKey.set(key, normalized);
+  });
+  return Array.from(byKey.values());
+}
+
 function normalizeEntries(entries) {
   return (Array.isArray(entries) ? entries : []).map((entry) => {
     const date = entry.date || entry.entry_date || entry.data || TODAY;
@@ -189,7 +243,7 @@ function normalizeEntries(entries) {
       month: entry.month || entry.entry_month || monthFromDate(date),
       type: entry.type || entry.tipo || 'Despesa',
       description: entry.description || entry.descricao || entry.descrição || entry.name || 'Lançamento',
-      category: entry.category || entry.categoria || 'Outros',
+      category: normalizeCategoryName(entry.category || entry.categoria || 'Outros'),
       paymentMethod: normalizePaymentMethod(entry.paymentMethod || entry.payment_method || entry.formaPagamento || entry.forma_de_pagamento),
       value: Number(entry.value ?? entry.valor ?? entry.amount ?? 0),
       status: entry.status || 'Pago',
@@ -208,7 +262,7 @@ function normalizeFixedBills(fixedBills) {
       name: bill.name || bill.nome || bill.description || bill.descricao || 'Conta fixa',
       value: Number(bill.value ?? bill.valor ?? bill.amount ?? bill.plannedValue ?? 0),
       dueDay: Number(bill.dueDay || bill.due_day || bill.vencimento || bill.day || 1),
-      category: bill.category || bill.categoria || 'Outros',
+      category: normalizeCategoryName(bill.category || bill.categoria || 'Outros'),
       recurring: bill.recurring !== false,
       active: bill.active !== false,
       startMonth: month,
@@ -288,7 +342,7 @@ function loadData() {
       fixedBills: normalizeFixedBills(parsed.fixedBills),
       account,
       planning: Object.keys(planning).length ? planning : { [CURRENT_MONTH]: defaultPlanning(CURRENT_MONTH), [nextMonth(CURRENT_MONTH)]: defaultPlanning(nextMonth(CURRENT_MONTH)) },
-      categories: Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : DEFAULT_CATEGORIES,
+      categories: normalizeCategories(parsed.categories),
       monthlyRevenue,
     };
   } catch {
@@ -297,7 +351,7 @@ function loadData() {
       fixedBills: [],
       account: defaultAccount(),
       planning: { [CURRENT_MONTH]: defaultPlanning(CURRENT_MONTH), [nextMonth(CURRENT_MONTH)]: defaultPlanning(nextMonth(CURRENT_MONTH)) },
-      categories: DEFAULT_CATEGORIES,
+      categories: normalizeCategories(),
       monthlyRevenue: { [CURRENT_MONTH]: defaultMonthlyRevenue() },
     };
   }
@@ -361,7 +415,7 @@ function fixedBillRows(fixedBills, userId) {
     name: bill.name,
     value: Number(bill.value || 0),
     due_day: Number(bill.dueDay || 1),
-    category: bill.category || 'Outros',
+    category: normalizeCategoryName(bill.category || 'Outros'),
     recurring: bill.recurring !== false,
     active: bill.active !== false,
     start_month: bill.startMonth || CURRENT_MONTH,
@@ -391,7 +445,7 @@ function entryRows(entries, userId) {
     user_id: userId,
     description: entry.description,
     value: Number(entry.value || 0),
-    category: entry.category || 'Outros',
+    category: normalizeCategoryName(entry.category || 'Outros'),
     payment_method: entry.paymentMethod || 'Pix',
     entry_date: entry.date || TODAY,
     entry_month: entry.month || monthFromDate(entry.date || TODAY),
@@ -436,7 +490,7 @@ function monthlyRevenueRows(monthlyRevenue, userId) {
 }
 
 function categoryRows(categories, userId) {
-  return categories.map((name) => ({ user_id: userId, name }));
+  return normalizeCategories(categories).map((name) => ({ user_id: userId, name }));
 }
 
 function buildStateFromCloud({ settings, fixedBillsRows, occurrenceRowsData, entriesRows, planningRowsData, categoriesRows, monthlyRevenueRowsData }) {
@@ -451,7 +505,7 @@ function buildStateFromCloud({ settings, fixedBillsRows, occurrenceRowsData, ent
     name: bill.name,
     value: Number(bill.value || 0),
     dueDay: Number(bill.due_day || 1),
-    category: bill.category || 'Outros',
+    category: normalizeCategoryName(bill.category || 'Outros'),
     recurring: bill.recurring !== false,
     active: bill.active !== false,
     startMonth: bill.start_month || CURRENT_MONTH,
@@ -464,7 +518,7 @@ function buildStateFromCloud({ settings, fixedBillsRows, occurrenceRowsData, ent
     month: entry.entry_month || monthFromDate(entry.entry_date || TODAY),
     type: entry.type || 'Despesa',
     description: entry.description || 'Lançamento',
-    category: entry.category || 'Outros',
+    category: normalizeCategoryName(entry.category || 'Outros'),
     paymentMethod: normalizePaymentMethod(entry.payment_method),
     value: Number(entry.value || 0),
     status: entry.status || 'Pago',
@@ -499,7 +553,7 @@ function buildStateFromCloud({ settings, fixedBillsRows, occurrenceRowsData, ent
     return acc;
   }, {});
 
-  const categories = categoriesRows.length ? categoriesRows.map((category) => category.name) : DEFAULT_CATEGORIES;
+  const categories = normalizeCategories(categoriesRows.map((category) => category.name));
   const account = { ...defaultAccount(), ...accountFromSettings(settings) };
 
   return {
@@ -516,12 +570,13 @@ function getMonthRevenue(monthlyRevenue, month) {
   return { ...defaultMonthlyRevenue(), ...(monthlyRevenue[month] || {}) };
 }
 
-function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account }) {
+function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account, categories = DEFAULT_CATEGORIES }) {
   const revenue = getMonthRevenue(monthlyRevenue, month);
   const bills = fixedBillInstances(fixedBills, month);
   const monthEntries = entries.filter((entry) => entry.month === month);
   const expenses = monthEntries.filter((entry) => entry.type !== 'Receita' && entry.type !== 'Conta');
   const paidExpenses = expenses.filter((entry) => entry.status === 'Pago');
+  const normalizedCategories = normalizeCategories([...categories, ...paidExpenses.map((entry) => entry.category)]);
   const cashRevenue = Number(revenue.brunoSalary || 0) + Number(revenue.mariahSalary || 0) + Number(revenue.extraIncome || 0) + Number(revenue.otherIncome || 0);
   const foodRevenue = Number(revenue.brunoFoodCard || 0) + Number(revenue.mariahFoodCard || 0);
   const foodOutflows = sumBy(revenue.foodCardOutflows || []);
@@ -541,10 +596,14 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account })
     value: sumBy(paidExpenses, (entry) => entry.paymentMethod === method),
   }));
 
-  const byCategory = DEFAULT_CATEGORIES.map((category) => ({
-    name: category,
-    value: sumBy(paidExpenses, (entry) => entry.category === category),
-  })).filter((item) => item.value > 0);
+  const byCategory = normalizedCategories.map((category) => {
+    const key = categoryKey(category);
+    return {
+      name: category,
+      value: sumBy(paidExpenses, (entry) => categoryKey(entry.category) === key),
+    };
+  }).filter((item) => item.value > 0);
+  const largestCategory = [...byCategory].sort((a, b) => b.value - a.value)[0];
 
   return {
     revenue,
@@ -568,7 +627,7 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account })
     accountBalance: Number(account.currentBalance || 0),
     byPayment,
     byCategory,
-    largestCategory: byCategory.sort((a, b) => b.value - a.value)[0],
+    largestCategory,
   };
 }
 
@@ -601,7 +660,7 @@ function mergeSnapshotsPreservingExisting(existing, incoming) {
     fixedBills: billsMerge.next,
     account: existing.account || incoming.account || defaultAccount(),
     planning: { ...(incoming.planning || {}), ...(existing.planning || {}) },
-    categories: Array.from(new Set([...(existing.categories || []), ...(incoming.categories || [])])),
+    categories: normalizeCategories([...(existing.categories || []), ...(incoming.categories || [])]),
     monthlyRevenue: { ...(incoming.monthlyRevenue || {}), ...(existing.monthlyRevenue || {}) },
   };
 }
@@ -616,7 +675,7 @@ function normalizeImportPayload(parsed) {
       name: entry.description,
       value: Number(entry.value || 0),
       dueDay: Number(entry.date?.slice(8, 10) || 1),
-      category: entry.category || 'Outros',
+      category: normalizeCategoryName(entry.category || 'Outros'),
       recurring: false,
       active: true,
       startMonth: entry.month,
@@ -628,7 +687,7 @@ function normalizeImportPayload(parsed) {
     fixedBills: [...importedBills, ...billsFromEntries],
     account: parsed.account && typeof parsed.account === 'object' ? { ...defaultAccount(), ...parsed.account } : null,
     planning: parsed.planning && typeof parsed.planning === 'object' ? parsed.planning : {},
-    categories: Array.isArray(parsed.categories) ? parsed.categories : [],
+    categories: normalizeCategories(parsed.categories),
     monthlyRevenue: normalizeMonthlyRevenue(parsed.monthlyRevenue || parsed.monthly_revenue || {}),
   };
 }
@@ -689,12 +748,12 @@ function App() {
   const fileInputRef = useRef(null);
 
   const monthStats = useMemo(
-    () => calculateMonth({ month: selectedMonth, entries, fixedBills, monthlyRevenue, account }),
-    [account, entries, fixedBills, monthlyRevenue, selectedMonth],
+    () => calculateMonth({ month: selectedMonth, entries, fixedBills, monthlyRevenue, account, categories }),
+    [account, categories, entries, fixedBills, monthlyRevenue, selectedMonth],
   );
 
   const filteredExpenses = monthStats.expenses
-    .filter((entry) => !expenseFilters.category || entry.category === expenseFilters.category)
+    .filter((entry) => !expenseFilters.category || categoryKey(entry.category) === categoryKey(expenseFilters.category))
     .filter((entry) => !expenseFilters.paymentMethod || entry.paymentMethod === expenseFilters.paymentMethod)
     .sort((a, b) => b.date.localeCompare(a.date));
 
@@ -1102,7 +1161,7 @@ function App() {
       month: monthFromDate(quickExpense.date || TODAY),
       type: quickExpense.type || 'Despesa',
       description: quickExpense.description.trim(),
-      category: quickExpense.category || 'Outros',
+      category: normalizeCategoryName(quickExpense.category || 'Outros', categories),
       paymentMethod: normalizePaymentMethod(quickExpense.paymentMethod),
       value,
       status: quickExpense.status || 'Pago',
@@ -1143,7 +1202,7 @@ function App() {
                 name: billForm.name.trim(),
                 value,
                 dueDay: Math.min(Math.max(Number(billForm.dueDay || 1), 1), 31),
-                category: billForm.category || 'Outros',
+                category: normalizeCategoryName(billForm.category || 'Outros', categories),
                 recurring: Boolean(billForm.recurring),
                 active: Boolean(billForm.active),
               }
@@ -1162,7 +1221,7 @@ function App() {
         name: billForm.name.trim(),
         value,
         dueDay: Math.min(Math.max(Number(billForm.dueDay || 1), 1), 31),
-        category: billForm.category || 'Outros',
+        category: normalizeCategoryName(billForm.category || 'Outros', categories),
         recurring: Boolean(billForm.recurring),
         active: Boolean(billForm.active),
         startMonth: selectedMonth,
@@ -1178,7 +1237,7 @@ function App() {
       name: bill.name,
       value: String(bill.value).replace('.', ','),
       dueDay: String(bill.dueDay),
-      category: bill.category || 'Outros',
+      category: normalizeCategoryName(bill.category || 'Outros', categories),
       recurring: bill.recurring !== false,
       active: bill.active !== false,
     });
@@ -1242,7 +1301,7 @@ function App() {
 
         if (normalized.account) setAccount((current) => ({ ...current, ...normalized.account }));
         if (Object.keys(normalized.planning).length) setPlanning((current) => ({ ...current, ...normalized.planning }));
-        if (normalized.categories.length) setCategories((current) => Array.from(new Set([...current, ...normalized.categories])));
+        if (normalized.categories.length) setCategories((current) => normalizeCategories([...current, ...normalized.categories]));
         if (Object.keys(normalized.monthlyRevenue).length) {
           setMonthlyRevenue((current) => ({ ...current, ...normalized.monthlyRevenue }));
         }
@@ -1502,7 +1561,7 @@ function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
   const visiblePaymentData = stats.byPayment.filter((item) => item.value > 0).map((item, index) => ({ ...item, color: CHART_COLORS[index % CHART_COLORS.length] }));
   const sortedCategories = [...stats.byCategory].sort((a, b) => b.value - a.value);
   const topCategories = sortedCategories.slice(0, 5);
-  const categoryOptions = useMemo(() => Array.from(new Set([...(categories || []), ...stats.byCategory.map((category) => category.name)])).filter(Boolean), [categories, stats.byCategory]);
+  const categoryOptions = useMemo(() => normalizeCategories([...(categories || []), ...stats.byCategory.map((category) => category.name)]), [categories, stats.byCategory]);
   const upcomingBills = [...stats.bills]
     .filter((bill) => bill.status !== 'Pago')
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
