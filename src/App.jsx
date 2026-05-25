@@ -1293,7 +1293,7 @@ function App() {
             saveCurrentStateToCloud={saveCurrentStateToCloud}
           />
 
-          {activeView === 'dashboard' && <Dashboard stats={monthStats} selectedMonth={selectedMonth} />}
+          {activeView === 'dashboard' && <Dashboard stats={monthStats} selectedMonth={selectedMonth} categories={categories} />}
           {activeView === 'receita' && (
             <Revenue
               selectedMonth={selectedMonth}
@@ -1493,22 +1493,35 @@ function SaveStatusBadge({ session, saveStatus }) {
   return <span className={`inline-flex rounded-full border border-white/60 px-3 py-1 text-xs font-semibold shadow-sm ${config.className}`}>{config.label}</span>;
 }
 
-function Dashboard({ stats, selectedMonth }) {
+function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
   const cashMap = [
     { name: 'Receita', value: stats.cashRevenue, color: '#30D158' },
     { name: 'Contas', value: stats.billsTotal, color: '#FF9F0A' },
     { name: 'Sobra', value: Math.max(stats.cashForecast, 0), color: stats.cashForecast >= 0 ? '#0A84FF' : '#FF375F' },
   ];
   const visiblePaymentData = stats.byPayment.filter((item) => item.value > 0).map((item, index) => ({ ...item, color: CHART_COLORS[index % CHART_COLORS.length] }));
-  const topCategories = [...stats.byCategory].sort((a, b) => b.value - a.value).slice(0, 5);
+  const sortedCategories = [...stats.byCategory].sort((a, b) => b.value - a.value);
+  const topCategories = sortedCategories.slice(0, 5);
+  const categoryOptions = useMemo(() => Array.from(new Set([...(categories || []), ...stats.byCategory.map((category) => category.name)])).filter(Boolean), [categories, stats.byCategory]);
   const upcomingBills = [...stats.bills]
     .filter((bill) => bill.status !== 'Pago')
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
     .slice(0, 5);
   const totalSpent = sumBy(stats.paidExpenses);
+  const defaultSelectedCategory = stats.largestCategory?.name || categoryOptions[0] || '';
+  const [selectedCategory, setSelectedCategory] = useState(defaultSelectedCategory);
+  const activeCategory = categoryOptions.includes(selectedCategory) ? selectedCategory : defaultSelectedCategory;
+  const selectedCategoryData = stats.byCategory.find((category) => category.name === activeCategory);
+  const selectedCategoryValue = Number(selectedCategoryData?.value || 0);
+  const selectedCategoryPercent = totalSpent > 0 ? Math.min((selectedCategoryValue / totalSpent) * 100, 100) : 0;
+  const selectedCategoryRank = sortedCategories.findIndex((category) => category.name === activeCategory) + 1;
   const billProgress = stats.billsTotal > 0 ? Math.min((stats.paidBills / stats.billsTotal) * 100, 100) : 0;
   const forecastHealth = stats.cashForecast < 0 ? 'Atenção' : stats.cashPosition < 0 ? 'Caixa apertado' : 'Saudável';
   const forecastTone = stats.cashForecast < 0 || stats.cashPosition < 0 ? 'text-amber-200' : 'text-emerald-200';
+
+  useEffect(() => {
+    if (activeCategory !== selectedCategory) setSelectedCategory(activeCategory);
+  }, [activeCategory, selectedCategory]);
 
   return (
     <div className="space-y-6">
@@ -1573,12 +1586,59 @@ function Dashboard({ stats, selectedMonth }) {
           <LightweightBarChart data={visiblePaymentData} emptyText="Sem gastos por forma de pagamento neste mês." />
         </Panel>
 
-        <Panel title="Top categorias" subtitle={stats.largestCategory ? `Maior: ${stats.largestCategory.name}` : 'Sem gastos no mês'}>
-          <div className="space-y-3">
-            {topCategories.map((category, index) => (
-              <DashboardRank key={category.name} index={index + 1} label={category.name} value={category.value} total={totalSpent} />
-            ))}
-            {!topCategories.length && <EmptyState text="Sem gastos por categoria neste mês." />}
+        <Panel title="Indicadores por categoria" subtitle={stats.largestCategory ? `Maior: ${stats.largestCategory.name}` : 'Sem gastos no mês'}>
+          <div className="grid gap-4">
+            <select value={activeCategory} onChange={(event) => setSelectedCategory(event.target.value)} className="input" disabled={!categoryOptions.length}>
+              {!categoryOptions.length && <option value="">Sem categorias</option>}
+              {categoryOptions.map((category) => (
+                <option key={category} value={category}>
+                  {category}
+                </option>
+              ))}
+            </select>
+
+            <div className="liquid-item rounded-3xl p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-500">Categoria selecionada</p>
+                  <p className="mt-1 truncate text-lg font-semibold text-slate-950">{activeCategory || 'Sem categoria'}</p>
+                </div>
+                <div className="sm:text-right">
+                  <p className="text-2xl font-semibold tracking-tight text-slate-950">{money(selectedCategoryValue)}</p>
+                  <p className="mt-1 text-sm font-medium text-slate-500">{selectedCategoryPercent.toFixed(1)}% do gasto total</p>
+                </div>
+              </div>
+
+              <div className="mt-4 h-3 overflow-hidden rounded-full bg-white/60 shadow-inner">
+                <div className="h-full rounded-full bg-[linear-gradient(90deg,#0A84FF,#30D158)]" style={{ width: `${Math.max(selectedCategoryPercent, selectedCategoryValue > 0 ? 3 : 0)}%` }} />
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs font-semibold uppercase text-slate-400">Posição</p>
+                  <p className={`mt-1 font-semibold ${selectedCategoryRank > 0 ? 'text-emerald-700' : 'text-slate-950'}`}>{selectedCategoryRank > 0 ? `${selectedCategoryRank}º` : 'Sem gasto'}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold uppercase text-slate-400">Total do mês</p>
+                  <p className={`mt-1 font-semibold ${totalSpent > 0 ? 'text-emerald-700' : 'text-slate-950'}`}>{money(totalSpent)}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {topCategories.map((category, index) => (
+                <DashboardRank
+                  key={category.name}
+                  index={index + 1}
+                  label={category.name}
+                  value={category.value}
+                  total={totalSpent}
+                  selected={category.name === activeCategory}
+                  onSelect={() => setSelectedCategory(category.name)}
+                />
+              ))}
+              {!topCategories.length && <EmptyState text="Sem gastos por categoria neste mês." />}
+            </div>
           </div>
         </Panel>
 
@@ -1647,14 +1707,21 @@ function LightweightBarChart({ data, emptyText = 'Sem dados para exibir.' }) {
   );
 }
 
-function DashboardRank({ index, label, value, total }) {
+function DashboardRank({ index, label, value, total, selected = false, onSelect }) {
   const percent = total > 0 ? Math.min((value / total) * 100, 100) : 0;
 
   return (
-    <div>
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={`w-full rounded-3xl p-3 text-left transition ${
+        selected ? 'bg-white/70 shadow-sm ring-2 ring-sky-200/80' : 'hover:bg-white/45'
+      }`}
+    >
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/60 bg-white/65 text-xs font-semibold text-slate-600 shadow-sm">{index}</span>
+          <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/60 text-xs font-semibold shadow-sm ${selected ? 'bg-sky-600 text-white' : 'bg-white/65 text-slate-600'}`}>{index}</span>
           <span className="truncate text-sm font-semibold text-slate-800">{label}</span>
         </div>
         <span className="text-sm font-semibold text-slate-950">{money(value)}</span>
@@ -1662,7 +1729,7 @@ function DashboardRank({ index, label, value, total }) {
       <div className="h-2 overflow-hidden rounded-full bg-white/60 shadow-inner">
         <div className="h-full rounded-full bg-[linear-gradient(90deg,#0A84FF,#30D158)]" style={{ width: `${percent}%` }} />
       </div>
-    </div>
+    </button>
   );
 }
 
