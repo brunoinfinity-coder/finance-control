@@ -589,6 +589,7 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account, c
   const pendingBills = sumBy(bills, (bill) => bill.status !== 'Pago');
   const foodBalance = foodRevenue - foodExpenses - foodOutflows;
   const cashForecast = cashRevenue - billsTotal;
+  const currentBalance = cashRevenue - billsTotal - cashAffectingExpenses;
   const cashPosition = Number(account.currentBalance || 0) - pendingBills;
 
   const byPayment = PAYMENT_METHODS.map((method) => ({
@@ -623,6 +624,7 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account, c
     pendingBills,
     foodBalance,
     cashForecast,
+    currentBalance,
     cashPosition,
     accountBalance: Number(account.currentBalance || 0),
     byPayment,
@@ -1575,8 +1577,8 @@ function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
   const selectedCategoryPercent = totalSpent > 0 ? Math.min((selectedCategoryValue / totalSpent) * 100, 100) : 0;
   const selectedCategoryRank = sortedCategories.findIndex((category) => category.name === activeCategory) + 1;
   const billProgress = stats.billsTotal > 0 ? Math.min((stats.paidBills / stats.billsTotal) * 100, 100) : 0;
-  const forecastHealth = stats.cashForecast < 0 ? 'Atenção' : stats.cashPosition < 0 ? 'Caixa apertado' : 'Saudável';
-  const forecastTone = stats.cashForecast < 0 || stats.cashPosition < 0 ? 'text-amber-200' : 'text-emerald-200';
+  const forecastHealth = stats.currentBalance < 0 ? 'Atenção' : stats.cashForecast < 0 ? 'Contas acima da receita' : 'Saudável';
+  const forecastTone = stats.currentBalance < 0 || stats.cashForecast < 0 ? 'text-amber-200' : 'text-emerald-200';
 
   useEffect(() => {
     if (activeCategory !== selectedCategory) setSelectedCategory(activeCategory);
@@ -1592,26 +1594,26 @@ function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
             </div>
             <p className={`text-sm font-semibold ${forecastTone}`}>{forecastHealth}</p>
             <h2 className="mt-2 max-w-3xl text-4xl font-semibold tracking-tight md:text-6xl">
-              {money(stats.cashForecast)}
+              {money(stats.currentBalance)}
             </h2>
             <p className="mt-4 max-w-2xl text-base leading-7 text-white/65">
-              Sobra prevista por receita: dinheiro do mês menos contas do mês. Gastos e crédito ficam como leitura separada para não distorcer a previsão.
+              Saldo atual calculado com entradas em dinheiro menos contas e gastos que saem da conta, como Pix, débito, dinheiro e boleto.
             </p>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
             <HeroMini label="Receita dinheiro" value={money(stats.cashRevenue)} />
-            <HeroMini label="Contas do mês" value={money(stats.billsTotal)} />
-            <HeroMini label="Posição de caixa" value={money(stats.cashPosition)} />
+            <HeroMini label="Recebido - contas" value={money(stats.cashForecast)} />
+            <HeroMini label="Saídas da conta" value={money(stats.cashAffectingExpenses)} />
           </div>
         </div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <SummaryCard title="Saldo atual" value={money(stats.currentBalance)} detail="Entradas - contas - Pix/débito/dinheiro/boleto." icon={Wallet} tone={stats.currentBalance >= 0 ? 'green' : 'red'} />
         <SummaryCard title="Receita em dinheiro" value={money(stats.cashRevenue)} detail="Salários + extras + outros." icon={ArrowUpCircle} tone="green" />
         <SummaryCard title="Total de contas" value={money(stats.billsTotal)} detail={`${money(stats.pendingBills)} ainda pendente.`} icon={ReceiptText} tone="amber" />
-        <SummaryCard title="Saldo atual" value={money(stats.accountBalance)} detail="Campo manual da conta." icon={Wallet} tone="slate" />
-        <SummaryCard title="Alimentação" value={money(stats.foodBalance)} detail={`${money(stats.foodExpenses + stats.foodOutflows)} usado/retirado.`} icon={WalletCards} tone={stats.foodBalance >= 0 ? 'blue' : 'red'} />
+        <SummaryCard title="Recebido - contas" value={money(stats.cashForecast)} detail="Valor recebido menos as contas." icon={PiggyBank} tone={stats.cashForecast >= 0 ? 'blue' : 'red'} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
