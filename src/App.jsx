@@ -743,6 +743,7 @@ function App() {
   const [localMigrationSnapshot, setLocalMigrationSnapshot] = useState(null);
   const lastSavedSnapshotRef = useRef('');
   const latestLocalSnapshotRef = useRef('');
+  const sessionUserIdRef = useRef(null);
   const cloudLoadRequestRef = useRef(0);
   const saveInFlightRef = useRef(false);
   const queuedSaveRef = useRef(null);
@@ -777,16 +778,24 @@ function App() {
 
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
+      sessionUserIdRef.current = data.session?.user?.id || null;
       setSession(data.session);
       if (!data.session) setSaveStatus('local');
       setAuthLoading(false);
     });
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      const nextUserId = nextSession?.user?.id || null;
+      const isSameUser = sessionUserIdRef.current === nextUserId;
+      sessionUserIdRef.current = nextUserId;
+
       setSession(nextSession);
+      setAuthMessage('');
+
+      if (isSameUser) return;
+
       setCloudLoaded(false);
       setSaveStatus(nextSession ? 'loading' : 'local');
-      setAuthMessage('');
     });
 
     return () => {
