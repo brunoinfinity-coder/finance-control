@@ -742,9 +742,11 @@ function App() {
   const [authMessage, setAuthMessage] = useState('');
   const [localMigrationSnapshot, setLocalMigrationSnapshot] = useState(null);
   const lastSavedSnapshotRef = useRef('');
+  const latestLocalSnapshotRef = useRef('');
   const cloudLoadRequestRef = useRef(0);
   const saveInFlightRef = useRef(false);
   const queuedSaveRef = useRef(null);
+  const saveAfterCloudLoadRef = useRef(false);
   const deletedEntryIdsRef = useRef(new Set());
   const deletedBillIdsRef = useRef(new Set());
   const fileInputRef = useRef(null);
@@ -760,7 +762,9 @@ function App() {
     .sort((a, b) => b.date.localeCompare(a.date));
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries, fixedBills, account, planning, categories, monthlyRevenue }));
+    const serialized = JSON.stringify({ entries, fixedBills, account, planning, categories, monthlyRevenue });
+    latestLocalSnapshotRef.current = serialized;
+    localStorage.setItem(STORAGE_KEY, serialized);
   }, [entries, fixedBills, account, planning, categories, monthlyRevenue]);
 
   useEffect(() => {
@@ -795,6 +799,7 @@ function App() {
     if (!session?.user || !supabase) {
       cloudLoadRequestRef.current += 1;
       queuedSaveRef.current = null;
+      saveAfterCloudLoadRef.current = false;
       setCloudLoaded(false);
       setSaveStatus('local');
       return;
@@ -817,6 +822,13 @@ function App() {
   }, [account, categories, cloudLoaded, entries, fixedBills, monthlyRevenue, planning, session?.user?.id]);
 
   useEffect(() => {
+    if (!session?.user || !supabase || !cloudLoaded || !saveAfterCloudLoadRef.current) return;
+    saveAfterCloudLoadRef.current = false;
+    const snapshot = localSnapshotFromState({ entries, fixedBills, account, planning, categories, monthlyRevenue });
+    saveCloudData(session.user.id, snapshot, JSON.stringify(snapshot));
+  }, [account, categories, cloudLoaded, entries, fixedBills, monthlyRevenue, planning, session?.user?.id]);
+
+  useEffect(() => {
     if (!session?.user || !supabase || !cloudLoaded) return undefined;
 
     const interval = window.setInterval(() => {
@@ -828,6 +840,7 @@ function App() {
 
   async function loadCloudData(userId) {
     const requestId = ++cloudLoadRequestRef.current;
+    const localSnapshotAtStart = latestLocalSnapshotRef.current;
     setCloudLoading(true);
     setCloudLoaded(false);
     setSaveStatus('loading');
@@ -880,16 +893,20 @@ function App() {
           categoriesRows: categoriesResult.data || [],
           monthlyRevenueRowsData: monthlyRevenueResult.data || [],
         });
+        const latestLocalSnapshot = latestLocalSnapshotRef.current;
+        const hasLocalChangesDuringLoad = Boolean(localSnapshotAtStart && latestLocalSnapshot && latestLocalSnapshot !== localSnapshotAtStart);
+        const nextState = hasLocalChangesDuringLoad ? mergeSnapshotsPreservingExisting(JSON.parse(latestLocalSnapshot), cloudState) : cloudState;
 
-        setEntries(cloudState.entries);
-        setFixedBills(cloudState.fixedBills);
-        setAccount(cloudState.account);
-        setPlanning(cloudState.planning);
-        setCategories(cloudState.categories);
-        setMonthlyRevenue(cloudState.monthlyRevenue);
+        setEntries(nextState.entries);
+        setFixedBills(nextState.fixedBills);
+        setAccount(nextState.account);
+        setPlanning(nextState.planning);
+        setCategories(nextState.categories);
+        setMonthlyRevenue(nextState.monthlyRevenue);
         lastSavedSnapshotRef.current = JSON.stringify(cloudState);
         setSaveStatus('saved');
-        setSyncMessage('Dados carregados do Supabase.');
+        setSyncMessage(hasLocalChangesDuringLoad ? 'Dados da nuvem carregados sem perder suas alterações locais. Salvando a versão mais recente...' : 'Dados carregados do Supabase.');
+        if (hasLocalChangesDuringLoad) saveAfterCloudLoadRef.current = true;
       } else {
         lastSavedSnapshotRef.current = '';
         setSaveStatus('saved');
@@ -960,6 +977,7 @@ function App() {
 
       const queuedSave = queuedSaveRef.current;
       queuedSaveRef.current = null;
+      saveAfterCloudLoadRef.current = false;
       if (queuedSave && queuedSave.serializedSnapshot !== lastSavedSnapshotRef.current) {
         window.setTimeout(() => {
           saveCloudData(queuedSave.userId, queuedSave.snapshot, queuedSave.serializedSnapshot);
@@ -980,10 +998,12 @@ function App() {
 
     if (!cloudLoaded) {
       if (saveStatus === 'loading') {
-        setSyncMessage('A nuvem ainda está carregando. Se a conexão travar, o app libera nova tentativa automaticamente após o tempo limite.');
+        saveAfterCloudLoadRef.current = true;
+        setSyncMessage('A nuvem ainda está carregando. Suas alterações estão no backup local e serão salvas assim que a conexão liberar.');
         return;
       }
 
+      saveAfterCloudLoadRef.current = true;
       setSaveStatus('loading');
       setSyncMessage('Recarregando a nuvem antes de salvar para preservar o histórico remoto.');
       loadCloudData(session.user.id);
@@ -1090,6 +1110,7 @@ function App() {
     if (!supabase) return;
     cloudLoadRequestRef.current += 1;
     queuedSaveRef.current = null;
+    saveAfterCloudLoadRef.current = false;
     await supabase.auth.signOut();
     setSession(null);
     setCloudLoaded(false);
