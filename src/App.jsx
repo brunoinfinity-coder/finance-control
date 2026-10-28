@@ -589,7 +589,7 @@ function calculateMonth({ month, entries, fixedBills, monthlyRevenue, account, c
   const pendingBills = sumBy(bills, (bill) => bill.status !== 'Pago');
   const foodBalance = foodRevenue - foodExpenses - foodOutflows;
   const cashForecast = cashRevenue - billsTotal;
-  const currentBalance = cashRevenue - billsTotal - cashAffectingExpenses;
+  const currentBalance = cashForecast;
   const cashPosition = Number(account.currentBalance || 0) - pendingBills;
 
   const byPayment = PAYMENT_METHODS.map((method) => ({
@@ -1627,20 +1627,20 @@ function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
               {money(stats.currentBalance)}
             </h2>
             <p className="mt-4 max-w-2xl text-base leading-7 text-white/65">
-              Saldo atual calculado com entradas em dinheiro menos contas e gastos que saem da conta, como Pix, débito, dinheiro e boleto.
+              Saldo atual calculado com entradas em dinheiro menos contas. Os gastos lançados são acompanhados separadamente e não reduzem este saldo.
             </p>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
             <HeroMini label="Receita dinheiro" value={money(stats.cashRevenue)} />
             <HeroMini label="Recebido - contas" value={money(stats.cashForecast)} />
-            <HeroMini label="Saídas da conta" value={money(stats.cashAffectingExpenses)} />
+            <HeroMini label="Gastos registrados" value={money(stats.cashAffectingExpenses)} />
           </div>
         </div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard title="Saldo atual" value={money(stats.currentBalance)} detail="Entradas - contas - Pix/débito/dinheiro/boleto." icon={Wallet} tone={stats.currentBalance >= 0 ? 'green' : 'red'} />
+        <SummaryCard title="Saldo atual" value={money(stats.currentBalance)} detail="Entradas - contas. Gastos não reduzem este saldo." icon={Wallet} tone={stats.currentBalance >= 0 ? 'green' : 'red'} />
         <SummaryCard title="Receita em dinheiro" value={money(stats.cashRevenue)} detail="Salários + extras + outros." icon={ArrowUpCircle} tone="green" />
         <SummaryCard title="Total de contas" value={money(stats.billsTotal)} detail={`${money(stats.pendingBills)} ainda pendente.`} icon={ReceiptText} tone="amber" />
         <SummaryCard title="Recebido - contas" value={money(stats.cashForecast)} detail="Valor recebido menos as contas." icon={PiggyBank} tone={stats.cashForecast >= 0 ? 'blue' : 'red'} />
@@ -1673,7 +1673,7 @@ function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1fr_0.9fr_0.9fr]">
-        <Panel title="Gastos por pagamento" subtitle="Crédito e alimentação não reduzem caixa automaticamente">
+        <Panel title="Gastos por pagamento" subtitle="Gastos são informativos e não reduzem o saldo atual">
           <LightweightBarChart data={visiblePaymentData} emptyText="Sem gastos por forma de pagamento neste mês." />
         </Panel>
 
@@ -1753,7 +1753,7 @@ function Dashboard({ stats, selectedMonth, categories = DEFAULT_CATEGORIES }) {
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
-        <DashboardInsight title="Afeta caixa" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto" />
+        <DashboardInsight title="Gastos em conta" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto (informativo)" />
         <DashboardInsight title="Crédito usado" value={money(stats.creditExpenses)} detail="Informativo, sem baixa imediata do saldo" />
         <DashboardInsight title="Gasto total" value={money(totalSpent)} detail="Leitura do comportamento do mês" />
       </section>
@@ -1971,12 +1971,12 @@ function Expenses({
           <SummaryCard title="Dinheiro" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Dinheiro'))} detail="Saída de caixa" icon={CircleDollarSign} tone="slate" compact />
           <SummaryCard title="Boleto" value={money(sumBy(stats.paidExpenses, (entry) => entry.paymentMethod === 'Boleto'))} detail="Saída de caixa" icon={ReceiptText} tone="amber" compact />
           <SummaryCard title="Alimentação" value={money(stats.foodExpenses)} detail="Reduz saldo alimentação" icon={WalletCards} tone="green" compact />
-          <SummaryCard title="Afeta caixa" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto" icon={Wallet} tone="slate" compact />
+          <SummaryCard title="Gastos em conta" value={money(stats.cashAffectingExpenses)} detail="Débito + Pix + Dinheiro + Boleto (informativo)" icon={Wallet} tone="slate" compact />
           <SummaryCard title="Não afeta caixa agora" value={money(stats.creditExpenses)} detail="Crédito é informativo" icon={CreditCard} tone="blue" compact />
           <SummaryCard title="Maior categoria" value={stats.largestCategory?.name || 'Sem dados'} detail={stats.largestCategory ? money(stats.largestCategory.value) : 'Nenhum gasto'} icon={ReceiptText} tone="amber" compact />
         </section>
 
-        <Panel title="Lançamentos do mês" subtitle="Gastos no crédito são informativos e não reduzem o saldo atual automaticamente.">
+        <Panel title="Lançamentos do mês" subtitle="Todos os gastos são informativos e não reduzem o saldo atual automaticamente.">
           <div className="mb-5 grid gap-3 md:grid-cols-2">
             <FilterSelect value={filters.category} options={categories} placeholder="Todas as categorias" onChange={(value) => setFilters({ ...filters, category: value })} />
             <FilterSelect value={filters.paymentMethod} options={PAYMENT_METHODS} placeholder="Todas as formas" onChange={(value) => setFilters({ ...filters, paymentMethod: value })} />
